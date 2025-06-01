@@ -75,7 +75,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       );
 
       // Add a timeout to the API call (e.g., 30 seconds)
-      final generated = await client.generateCompletion(request: request).timeout(const Duration(minutes: 1));
+      final generated = await client.generateCompletion(request: request).timeout(const Duration(minutes: 3));
 
       setState(() {
         _messages.remove(aiTypingMessage); // Remove the "thinking..." message
@@ -84,7 +84,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     } on TimeoutException catch (_) {
       setState(() {
         _messages.remove(aiTypingMessage); // Remove the "thinking..." message
-        _messages.add(ChatMessage(text: 'Error: Request timed out after 30 seconds.', isUser: false));
+        _messages.add(ChatMessage(text: 'Error: Request timed out after 3 minutes.', isUser: false));
       });
     } catch (e) {
       setState(() {
