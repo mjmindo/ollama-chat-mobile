@@ -1,5 +1,7 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.ollama_chat_app">
+   <uses-permission android:name="android.permission.INTERNET"/> <!-- Ensure this line is present -->
+   <application
         android:label="ollama_chat_app"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
