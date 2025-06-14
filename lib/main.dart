@@ -5,9 +5,10 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 
-part 'main.g.dart';
+import 'package:speech_to_text/speech_to_text.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 
-// We no longer need a complex default prompt.
+part 'main.g.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -70,8 +71,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   final ScrollController _scrollController = ScrollController();
   late TextEditingController _baseUrlController;
   late TextEditingController _modelController;
-  
-  // Re-introducing the controller for the user-editable system prompt.
   late TextEditingController _systemPromptController;
 
   http.Client? _client;
@@ -79,14 +78,21 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   late Box<ChatMessage> _chatBox;
   late Box _appStateBox;
   List<int>? _conversationContext;
+  
+  final SpeechToText _speechToText = SpeechToText();
+  final FlutterTts _flutterTts = FlutterTts();
+  bool _isListening = false;
+  bool _speechEnabled = false;
+
+  double _speechRate = 1.0;
+  double _speechPitch = 1.0;
+
 
   @override
   void initState() {
     super.initState();
     _baseUrlController = TextEditingController(text: 'http://localhost:11434');
-    _modelController = TextEditingController(text: 'gemma3:1B');
-    
-    // Initialize the controller for the editable system prompt.
+    _modelController = TextEditingController(text: 'llama3');
     _systemPromptController = TextEditingController();
 
     _chatBox = Hive.box<ChatMessage>('chatHistory');
@@ -95,15 +101,77 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _messages = _chatBox.values.toList();
     _conversationContext = _appStateBox.get('lastContext')?.cast<int>();
     
-    // Load the user's saved system prompt, defaulting to an empty string.
     final storedSystemPrompt = _appStateBox.get('systemPrompt');
     _systemPromptController.text = storedSystemPrompt ?? '';
 
-    // Add the listener to auto-save any changes the user makes.
     _systemPromptController.addListener(() {
       _appStateBox.put('systemPrompt', _systemPromptController.text);
     });
+
+    _speechRate = _appStateBox.get('speechRate') ?? 1.0;
+    _speechPitch = _appStateBox.get('speechPitch') ?? 1.0;
+    
+    _initSpeech();
   }
+  
+  void _initSpeech() async {
+    try {
+       _speechEnabled = await _speechToText.initialize();
+    } catch (e) {
+      print('Speech recognition failed to initialize: $e');
+    }
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _startListening() async {
+    await _stopSpeaking();
+    await _speechToText.listen(
+      onResult: (result) {
+        setState(() {
+          _controller.text = result.recognizedWords;
+        });
+      },
+    );
+    setState(() {
+      _isListening = true;
+    });
+  }
+
+  Future<void> _stopListening() async {
+    await _speechToText.stop();
+    if (mounted) {
+      setState(() {
+        _isListening = false;
+      });
+    }
+  }
+
+  Future<void> _speak(String text) async {
+    await _flutterTts.setLanguage("en-US");
+    await _flutterTts.setPitch(_speechPitch);
+    await _flutterTts.setSpeechRate(_speechRate);
+    await _flutterTts.speak(text);
+  }
+
+  Future<void> _stopSpeaking() async {
+    await _flutterTts.stop();
+  }
+
+  // COPY FEATURE: New method to handle copying text to clipboard.
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Copied to clipboard'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
 
   Future<void> _sendMessage(String text) async {
     if (text.trim().isEmpty) return;
@@ -128,14 +196,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     try {
       _client = http.Client();
       
-      // Read the user's manual prompt from the controller.
       final systemPrompt = _systemPromptController.text.trim();
-
       final body = {
         'model': _modelController.text,
         'prompt': text,
         'stream': true,
-        // Use the user's system prompt if it's not empty.
         if (systemPrompt.isNotEmpty) 'system': systemPrompt,
         if (_conversationContext != null) 'context': _conversationContext,
       };
@@ -149,7 +214,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
       String streamedResponseText = '';
       
-      // Restore real-time streaming to the UI.
       await for (final line in lines) {
         if (mounted) {
           try {
@@ -177,7 +241,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         }
       }
 
-      final finalMessage = ChatMessage(text: streamedResponseText.trim(), isUser: false);
+      final finalMessageText = streamedResponseText.trim();
+      final finalMessage = ChatMessage(text: finalMessageText, isUser: false);
       await _chatBox.put(aiMessageKey, finalMessage);
 
     } catch (e) {
@@ -203,8 +268,13 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   }
 
   void _stopGeneration() {
-    _isManuallyStopped = true;
-    _client?.close();
+    if (_isLoading) {
+      setState(() {
+        _isManuallyStopped = true;
+      });
+      _client?.close();
+    }
+    _stopSpeaking();
   }
 
   Future<void> _clearConversation() async {
@@ -236,10 +306,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _scrollController.dispose();
     _baseUrlController.dispose();
     _modelController.dispose();
-    // Dispose the system prompt controller.
     _systemPromptController.removeListener(() {});
     _systemPromptController.dispose();
     _client?.close();
+    _speechToText.cancel();
+    _flutterTts.stop();
     super.dispose();
   }
   
@@ -273,7 +344,15 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               controller: _scrollController,
               padding: const EdgeInsets.all(8.0),
               itemCount: _messages.length,
-              itemBuilder: (context, index) => ChatBubble(message: _messages[index]),
+              itemBuilder: (context, index) {
+                final message = _messages[index];
+                return ChatBubble(
+                  message: message,
+                  onSpeak: message.isUser ? null : _speak,
+                  // COPY FEATURE: Pass the new _copyToClipboard function.
+                  onCopy: message.isUser ? null : _copyToClipboard,
+                );
+              },
             ),
           ),
           _buildInputArea(context),
@@ -282,35 +361,73 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
   }
 
-  // The settings dialog now includes the editable System Prompt again.
   void _showSettingsDialog(BuildContext context) {
     showDialog(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: const Text('Settings'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'Ollama Base URL', border: OutlineInputBorder(), isDense: true)),
-                const SizedBox(height: 16.0),
-                TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', border: OutlineInputBorder(), isDense: true)),
-                const SizedBox(height: 16.0),
-                // The editable memory box is back.
-                TextField(
-                  controller: _systemPromptController,
-                  decoration: const InputDecoration(
-                    labelText: 'System Prompt (AI Memory)',
-                    hintText: 'e.g., You are a helpful assistant who always answers in rhymes.',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 8,
+        return StatefulBuilder(
+          builder: (context, dialogSetState) {
+            return AlertDialog(
+              title: const Text('Settings'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'Ollama Base URL', border: OutlineInputBorder(), isDense: true)),
+                    const SizedBox(height: 16.0),
+                    TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', border: OutlineInputBorder(), isDense: true)),
+                    const SizedBox(height: 16.0),
+                    TextField(
+                      controller: _systemPromptController,
+                      decoration: const InputDecoration(
+                        labelText: 'System Prompt (AI Memory)',
+                        border: OutlineInputBorder(),
+                      ),
+                      maxLines: 8,
+                    ),
+                    const SizedBox(height: 24.0),
+                    Text(
+                      'Speech Speed',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Slider(
+                      value: _speechRate,
+                      min: 0.1,
+                      max: 2.0,
+                      divisions: 19,
+                      label: _speechRate.toStringAsFixed(1),
+                      onChanged: (newRate) {
+                        dialogSetState(() {
+                          _speechRate = newRate;
+                        });
+                        _appStateBox.put('speechRate', newRate);
+                      },
+                    ),
+                    const SizedBox(height: 16.0),
+                    Text(
+                      'Speech Pitch',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Slider(
+                      value: _speechPitch,
+                      min: 0.5,
+                      max: 2.0,
+                      divisions: 15,
+                      label: _speechPitch.toStringAsFixed(1),
+                      onChanged: (newPitch) {
+                        dialogSetState(() {
+                          _speechPitch = newPitch;
+                        });
+                        _appStateBox.put('speechPitch', newPitch);
+                      },
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
-          actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Done'))],
+              ),
+              actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Done'))],
+            );
+          },
         );
       },
     );
@@ -321,9 +438,15 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       color: Theme.of(context).cardColor,
       elevation: 4.0,
       child: Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 8.0, left: 16.0, right: 16.0, top: 8.0),
+        padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 8.0, left: 8.0, right: 8.0, top: 8.0),
         child: Row(
           children: [
+            IconButton(
+              icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
+              color: _isListening ? Theme.of(context).colorScheme.primary : null,
+              onPressed: !_speechEnabled ? null : (_isListening ? _stopListening : _startListening),
+              tooltip: _isListening ? 'Stop listening' : 'Listen',
+            ),
             Expanded(
               child: TextField(
                 controller: _controller,
@@ -363,33 +486,86 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   }
 }
 
+// COPY FEATURE: The ChatBubble widget is updated to accept and use the onCopy callback.
 class ChatBubble extends StatelessWidget {
   final ChatMessage message;
-  const ChatBubble({required this.message, super.key});
+  final void Function(String text)? onSpeak;
+  final void Function(String text)? onCopy;
+
+  const ChatBubble({
+    required this.message,
+    this.onSpeak,
+    this.onCopy,
+    super.key,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isUser = message.isUser;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+
+    return Column(
+      crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
-        if (!isUser) const Padding(padding: EdgeInsets.only(right: 8.0, top: 4.0), child: CircleAvatar(child: Icon(Icons.auto_awesome))),
-        Flexible(
-          child: Container(
-            margin: const EdgeInsets.symmetric(vertical: 4.0),
-            padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
-            decoration: BoxDecoration(color: isUser ? theme.colorScheme.primaryContainer : theme.colorScheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(16.0)),
-            child: SelectionArea(
-              child: MarkdownBody(
-                data: message.text.isEmpty ? '...' : message.text,
-                styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(p: theme.textTheme.bodyLarge),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+          children: [
+            if (!isUser)
+              const Padding(
+                padding: EdgeInsets.only(right: 8.0, top: 4.0),
+                child: CircleAvatar(child: Icon(Icons.auto_awesome)),
+              ),
+            Flexible(
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 4.0),
+                padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
+                decoration: BoxDecoration(
+                  color: isUser ? theme.colorScheme.primaryContainer : theme.colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(16.0),
+                ),
+                child: SelectionArea(
+                  child: MarkdownBody(
+                    data: message.text.isEmpty ? '...' : message.text,
+                    styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(p: theme.textTheme.bodyLarge),
+                  ),
+                ),
               ),
             ),
-          ),
+            if (isUser)
+              const Padding(
+                padding: EdgeInsets.only(left: 8.0, top: 4.0),
+                child: CircleAvatar(child: Icon(Icons.person_outline)),
+              ),
+          ],
         ),
-        if (isUser) const Padding(padding: EdgeInsets.only(left: 8.0, top: 4.0), child: CircleAvatar(child: Icon(Icons.person_outline))),
+        // Action buttons for AI messages
+        if (!isUser && message.text.isNotEmpty)
+          Padding(
+            // Adjust padding to align the buttons under the bubble
+            padding: const EdgeInsets.only(left: 48.0, right: 48.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.start,
+              children: [
+                // Speak button
+                if (onSpeak != null)
+                  IconButton(
+                    icon: const Icon(Icons.volume_up_outlined),
+                    iconSize: 20,
+                    tooltip: 'Read aloud',
+                    onPressed: () => onSpeak!(message.text),
+                  ),
+                // COPY FEATURE: The new copy button
+                if (onCopy != null)
+                  IconButton(
+                    icon: const Icon(Icons.copy_outlined),
+                    iconSize: 20,
+                    tooltip: 'Copy text',
+                    onPressed: () => onCopy!(message.text),
+                  ),
+              ],
+            ),
+          )
       ],
     );
   }
