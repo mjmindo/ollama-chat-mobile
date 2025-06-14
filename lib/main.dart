@@ -1,3 +1,4 @@
+import 'dart:io'; // NEW PARAMS: Required for File operations.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -7,6 +8,8 @@ import 'dart:convert';
 
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+// NEW PARAMS: Import the new package.
+import 'package:image_picker/image_picker.dart';
 
 part 'main.g.dart';
 
@@ -72,6 +75,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   late TextEditingController _baseUrlController;
   late TextEditingController _modelController;
   late TextEditingController _systemPromptController;
+  // NEW PARAMS: Add controllers and state for new features.
+  late TextEditingController _suffixController;
+  bool _shouldThink = false;
+  File? _selectedImage;
+
 
   http.Client? _client;
   bool _isManuallyStopped = false;
@@ -92,8 +100,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   void initState() {
     super.initState();
     _baseUrlController = TextEditingController(text: 'http://localhost:11434');
-    _modelController = TextEditingController(text: 'llama3');
+    _modelController = TextEditingController(text: 'llava'); // Default to a multimodal model
     _systemPromptController = TextEditingController();
+    // NEW PARAMS: Initialize new controllers.
+    _suffixController = TextEditingController();
+
 
     _chatBox = Hive.box<ChatMessage>('chatHistory');
     _appStateBox = Hive.box('appState');
@@ -159,7 +170,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     await _flutterTts.stop();
   }
 
-  // COPY FEATURE: New method to handle copying text to clipboard.
   Future<void> _copyToClipboard(String text) async {
     await Clipboard.setData(ClipboardData(text: text));
     if (mounted) {
@@ -172,9 +182,28 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
+  // NEW PARAMS: Method to pick an image from the gallery.
+  Future<void> _pickImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+    if (image != null) {
+      setState(() {
+        _selectedImage = File(image.path);
+      });
+    }
+  }
+
+  // NEW PARAMS: Method to clear the selected image.
+  void _clearImage() {
+    setState(() {
+      _selectedImage = null;
+    });
+  }
+
 
   Future<void> _sendMessage(String text) async {
-    if (text.trim().isEmpty) return;
+    // Also check for image, if text is empty but image is present, we can still send.
+    if (text.trim().isEmpty && _selectedImage == null) return;
     
     _isManuallyStopped = false;
     final userMessage = ChatMessage(text: text, isUser: true);
@@ -195,19 +224,36 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
     try {
       _client = http.Client();
+
+      // NEW PARAMS: Encode image to Base64 if one is selected.
+      String? base64Image;
+      if (_selectedImage != null) {
+        final imageBytes = await _selectedImage!.readAsBytes();
+        base64Image = base64Encode(imageBytes);
+      }
       
       final systemPrompt = _systemPromptController.text.trim();
+      // NEW PARAMS: Add new fields to the request body.
       final body = {
         'model': _modelController.text,
         'prompt': text,
+        'suffix': _suffixController.text.trim().isNotEmpty ? _suffixController.text.trim() : null,
+        'system': systemPrompt.isNotEmpty ? systemPrompt : null,
+        'think': _shouldThink,
+        'images': base64Image != null ? [base64Image] : null,
+        'context': _conversationContext,
         'stream': true,
-        if (systemPrompt.isNotEmpty) 'system': systemPrompt,
-        if (_conversationContext != null) 'context': _conversationContext,
       };
+
+      // Remove null values from the map
+      body.removeWhere((key, value) => value == null);
 
       final request = http.Request('POST', Uri.parse('${_baseUrlController.text}/api/generate'))
         ..headers['Content-Type'] = 'application/json'
         ..body = jsonEncode(body);
+
+      // NEW PARAMS: Clear the selected image after preparing the request.
+      _clearImage();
 
       final streamedResponse = await _client!.send(request);
       final lines = streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter());
@@ -308,6 +354,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _modelController.dispose();
     _systemPromptController.removeListener(() {});
     _systemPromptController.dispose();
+    // NEW PARAMS: Dispose the new controller.
+    _suffixController.dispose();
     _client?.close();
     _speechToText.cancel();
     _flutterTts.stop();
@@ -349,18 +397,56 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 return ChatBubble(
                   message: message,
                   onSpeak: message.isUser ? null : _speak,
-                  // COPY FEATURE: Pass the new _copyToClipboard function.
                   onCopy: message.isUser ? null : _copyToClipboard,
                 );
               },
             ),
           ),
+          // NEW PARAMS: Add the image preview widget area.
+          if (_selectedImage != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              child: Stack(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Theme.of(context).colorScheme.outline),
+                      borderRadius: BorderRadius.circular(8.0),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8.0),
+                      child: Image.file(
+                        _selectedImage!,
+                        height: 100,
+                        width: 100,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: InkWell(
+                      onTap: _clearImage,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.5),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.close, color: Colors.white, size: 18),
+                      ),
+                    ),
+                  )
+                ],
+              ),
+            ),
           _buildInputArea(context),
         ],
       ),
     );
   }
 
+  // NEW PARAMS: Updated settings dialog with new options.
   void _showSettingsDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -376,49 +462,60 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   children: [
                     TextField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'Ollama Base URL', border: OutlineInputBorder(), isDense: true)),
                     const SizedBox(height: 16.0),
-                    TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', border: OutlineInputBorder(), isDense: true)),
+                    TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', hintText: 'e.g., llava, llama3', border: OutlineInputBorder(), isDense: true)),
                     const SizedBox(height: 16.0),
                     TextField(
                       controller: _systemPromptController,
-                      decoration: const InputDecoration(
-                        labelText: 'System Prompt (AI Memory)',
-                        border: OutlineInputBorder(),
-                      ),
+                      decoration: const InputDecoration(labelText: 'System Prompt (AI Memory)', border: OutlineInputBorder()),
                       maxLines: 8,
                     ),
-                    const SizedBox(height: 24.0),
-                    Text(
-                      'Speech Speed',
-                      style: Theme.of(context).textTheme.titleMedium,
+                    const SizedBox(height: 16.0),
+                    TextField(
+                      controller: _suffixController,
+                      decoration: const InputDecoration(labelText: 'Suffix', hintText: 'Text to append after response', border: OutlineInputBorder()),
                     ),
+                    const SizedBox(height: 16.0),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text("'Think' Mode"),
+                        Switch(
+                          value: _shouldThink,
+                          onChanged: (value) {
+                            dialogSetState(() {
+                              _shouldThink = value;
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                    // This is the new helper text
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4.0),
+                      child: Text(
+                        "Note: For supported models only.",
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    const Divider(height: 32.0),
+                    Text('Speech Speed', style: Theme.of(context).textTheme.titleMedium),
                     Slider(
                       value: _speechRate,
-                      min: 0.1,
-                      max: 2.0,
-                      divisions: 19,
+                      min: 0.1, max: 2.0, divisions: 19,
                       label: _speechRate.toStringAsFixed(1),
                       onChanged: (newRate) {
-                        dialogSetState(() {
-                          _speechRate = newRate;
-                        });
+                        dialogSetState(() { _speechRate = newRate; });
                         _appStateBox.put('speechRate', newRate);
                       },
                     ),
                     const SizedBox(height: 16.0),
-                    Text(
-                      'Speech Pitch',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+                    Text('Speech Pitch', style: Theme.of(context).textTheme.titleMedium),
                     Slider(
                       value: _speechPitch,
-                      min: 0.5,
-                      max: 2.0,
-                      divisions: 15,
+                      min: 0.5, max: 2.0, divisions: 15,
                       label: _speechPitch.toStringAsFixed(1),
                       onChanged: (newPitch) {
-                        dialogSetState(() {
-                          _speechPitch = newPitch;
-                        });
+                        dialogSetState(() { _speechPitch = newPitch; });
                         _appStateBox.put('speechPitch', newPitch);
                       },
                     ),
@@ -433,6 +530,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
   }
 
+  // NEW PARAMS: Input area now includes an attach file button.
   Widget _buildInputArea(BuildContext context) {
     return Material(
       color: Theme.of(context).cardColor,
@@ -441,6 +539,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 8.0, left: 8.0, right: 8.0, top: 8.0),
         child: Row(
           children: [
+            IconButton(
+              icon: const Icon(Icons.attach_file_outlined),
+              onPressed: _pickImage,
+              tooltip: 'Attach Image',
+            ),
             IconButton(
               icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
               color: _isListening ? Theme.of(context).colorScheme.primary : null,
@@ -486,7 +589,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   }
 }
 
-// COPY FEATURE: The ChatBubble widget is updated to accept and use the onCopy callback.
 class ChatBubble extends StatelessWidget {
   final ChatMessage message;
   final void Function(String text)? onSpeak;
@@ -539,15 +641,12 @@ class ChatBubble extends StatelessWidget {
               ),
           ],
         ),
-        // Action buttons for AI messages
         if (!isUser && message.text.isNotEmpty)
           Padding(
-            // Adjust padding to align the buttons under the bubble
             padding: const EdgeInsets.only(left: 48.0, right: 48.0),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.start,
               children: [
-                // Speak button
                 if (onSpeak != null)
                   IconButton(
                     icon: const Icon(Icons.volume_up_outlined),
@@ -555,7 +654,6 @@ class ChatBubble extends StatelessWidget {
                     tooltip: 'Read aloud',
                     onPressed: () => onSpeak!(message.text),
                   ),
-                // COPY FEATURE: The new copy button
                 if (onCopy != null)
                   IconButton(
                     icon: const Icon(Icons.copy_outlined),
