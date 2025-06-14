@@ -121,7 +121,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   void initState() {
     super.initState();
     _baseUrlController = TextEditingController(text: 'http://localhost:11434');
-    _modelController = TextEditingController(text: 'llama3.2:3b');
+    _modelController = TextEditingController(text: 'gemma3:1B');
     _systemPromptController = TextEditingController();
     _suffixController = TextEditingController();
 
