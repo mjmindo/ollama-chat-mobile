@@ -1,4 +1,4 @@
-import 'dart:io'; // NEW PARAMS: Required for File operations.
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -8,7 +8,6 @@ import 'dart:convert';
 
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-// NEW PARAMS: Import the new package.
 import 'package:image_picker/image_picker.dart';
 
 part 'main.g.dart';
@@ -23,29 +22,52 @@ Future<void> main() async {
   runApp(const MyApp());
 }
 
-class MyApp extends StatelessWidget {
+// THEME TOGGLE: Convert MyApp to a StatefulWidget to manage theme state.
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  // THEME TOGGLE: Create a static method for child widgets to access the state.
+  static _MyAppState of(BuildContext context) =>
+      context.findAncestorStateOfType<_MyAppState>()!;
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  // THEME TOGGLE: Add state variable for the theme mode.
+  ThemeMode _themeMode = ThemeMode.system;
+
+  // THEME TOGGLE: Method for child widgets to call to change the theme.
+  void changeTheme(ThemeMode themeMode) {
+    setState(() {
+      _themeMode = themeMode;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Ollama Flutter Client',
+      title: 'Ollama Flutter',
+      // THEME TOGGLE: Use the state variable to set the theme mode.
+      themeMode: _themeMode,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
+          // Change the seed color to blue for the light theme.
+          seedColor: Colors.blue,
           brightness: Brightness.light,
         ),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
+          // Change the seed color to blue for the dark theme.
+          seedColor: Colors.blue,
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
       ),
-      themeMode: ThemeMode.system,
       home: const OllamaChatPage(),
     );
   }
@@ -75,7 +97,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   late TextEditingController _baseUrlController;
   late TextEditingController _modelController;
   late TextEditingController _systemPromptController;
-  // NEW PARAMS: Add controllers and state for new features.
   late TextEditingController _suffixController;
   bool _shouldThink = false;
   File? _selectedImage;
@@ -100,9 +121,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   void initState() {
     super.initState();
     _baseUrlController = TextEditingController(text: 'http://localhost:11434');
-    _modelController = TextEditingController(text: 'llava'); // Default to a multimodal model
+    _modelController = TextEditingController(text: 'llama3.2:3b');
     _systemPromptController = TextEditingController();
-    // NEW PARAMS: Initialize new controllers.
     _suffixController = TextEditingController();
 
 
@@ -182,7 +202,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
-  // NEW PARAMS: Method to pick an image from the gallery.
   Future<void> _pickImage() async {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
@@ -193,7 +212,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
-  // NEW PARAMS: Method to clear the selected image.
   void _clearImage() {
     setState(() {
       _selectedImage = null;
@@ -202,7 +220,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
 
   Future<void> _sendMessage(String text) async {
-    // Also check for image, if text is empty but image is present, we can still send.
     if (text.trim().isEmpty && _selectedImage == null) return;
     
     _isManuallyStopped = false;
@@ -225,7 +242,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     try {
       _client = http.Client();
 
-      // NEW PARAMS: Encode image to Base64 if one is selected.
       String? base64Image;
       if (_selectedImage != null) {
         final imageBytes = await _selectedImage!.readAsBytes();
@@ -233,7 +249,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       }
       
       final systemPrompt = _systemPromptController.text.trim();
-      // NEW PARAMS: Add new fields to the request body.
       final body = {
         'model': _modelController.text,
         'prompt': text,
@@ -245,14 +260,12 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         'stream': true,
       };
 
-      // Remove null values from the map
       body.removeWhere((key, value) => value == null);
 
       final request = http.Request('POST', Uri.parse('${_baseUrlController.text}/api/generate'))
         ..headers['Content-Type'] = 'application/json'
         ..body = jsonEncode(body);
 
-      // NEW PARAMS: Clear the selected image after preparing the request.
       _clearImage();
 
       final streamedResponse = await _client!.send(request);
@@ -354,7 +367,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _modelController.dispose();
     _systemPromptController.removeListener(() {});
     _systemPromptController.dispose();
-    // NEW PARAMS: Dispose the new controller.
     _suffixController.dispose();
     _client?.close();
     _speechToText.cancel();
@@ -378,9 +390,27 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Ollama Flutter Client'),
+        title: const Text('Ollama Flutter'),
         shape: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.outlineVariant, width: 0.5)),
         actions: [
+          // THEME TOGGLE: Add the new button to the AppBar.
+          IconButton(
+            icon: Icon(
+              // Check the app's brightness to determine which icon to show.
+              Theme.of(context).brightness == Brightness.dark
+                  ? Icons.light_mode_outlined
+                  : Icons.dark_mode_outlined,
+            ),
+            tooltip: 'Toggle Theme',
+            onPressed: () {
+              // Determine the current brightness and toggle to the opposite mode.
+              final newTheme = Theme.of(context).brightness == Brightness.dark
+                  ? ThemeMode.light
+                  : ThemeMode.dark;
+              // Call the changeTheme method from MyApp to update the state.
+              MyApp.of(context).changeTheme(newTheme);
+            },
+          ),
           IconButton(icon: const Icon(Icons.delete_sweep_outlined), tooltip: 'Clear Conversation', onPressed: _clearConversation),
           IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Settings', onPressed: () => _showSettingsDialog(context)),
         ],
@@ -402,7 +432,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               },
             ),
           ),
-          // NEW PARAMS: Add the image preview widget area.
           if (_selectedImage != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
@@ -446,7 +475,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
   }
 
-  // NEW PARAMS: Updated settings dialog with new options.
   void _showSettingsDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -460,7 +488,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    TextField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'Ollama Base URL', border: OutlineInputBorder(), isDense: true)),
+                    TextField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'Ollama Base URL', hintText: 'e.g., http://localhost:11434', border: OutlineInputBorder(), isDense: true)),
                     const SizedBox(height: 16.0),
                     TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', hintText: 'e.g., llava, llama3', border: OutlineInputBorder(), isDense: true)),
                     const SizedBox(height: 16.0),
@@ -489,7 +517,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                         ),
                       ],
                     ),
-                    // This is the new helper text
                     Padding(
                       padding: const EdgeInsets.only(top: 4.0),
                       child: Text(
@@ -530,7 +557,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
   }
 
-  // NEW PARAMS: Input area now includes an attach file button.
   Widget _buildInputArea(BuildContext context) {
     return Material(
       color: Theme.of(context).cardColor,
