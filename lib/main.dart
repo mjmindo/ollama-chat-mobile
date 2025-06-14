@@ -5,9 +5,9 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 
-import 'package:path_provider/path_provider.dart';
-
 part 'main.g.dart';
+
+// We no longer need a complex default prompt.
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -26,7 +26,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Ollama Flutter',
+      title: 'Ollama Flutter Client',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.deepPurple,
@@ -71,7 +71,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   late TextEditingController _baseUrlController;
   late TextEditingController _modelController;
   
-  // SYSTEM PROMPT: Add a controller for the new memory/system prompt text field.
+  // Re-introducing the controller for the user-editable system prompt.
   late TextEditingController _systemPromptController;
 
   http.Client? _client;
@@ -84,20 +84,22 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   void initState() {
     super.initState();
     _baseUrlController = TextEditingController(text: 'http://localhost:11434');
-    _modelController = TextEditingController(text: 'llama3');
+    _modelController = TextEditingController(text: 'gemma3:1B');
     
-    // SYSTEM PROMPT: Initialize the controller.
+    // Initialize the controller for the editable system prompt.
     _systemPromptController = TextEditingController();
 
     _chatBox = Hive.box<ChatMessage>('chatHistory');
-    _messages = _chatBox.values.toList();
     _appStateBox = Hive.box('appState');
+    
+    _messages = _chatBox.values.toList();
     _conversationContext = _appStateBox.get('lastContext')?.cast<int>();
     
-    // SYSTEM PROMPT: Load the saved system prompt from the box when the app starts.
-    _systemPromptController.text = _appStateBox.get('systemPrompt') ?? '';
+    // Load the user's saved system prompt, defaulting to an empty string.
+    final storedSystemPrompt = _appStateBox.get('systemPrompt');
+    _systemPromptController.text = storedSystemPrompt ?? '';
 
-    // SYSTEM PROMPT: Add a listener to save the system prompt automatically as the user types.
+    // Add the listener to auto-save any changes the user makes.
     _systemPromptController.addListener(() {
       _appStateBox.put('systemPrompt', _systemPromptController.text);
     });
@@ -113,7 +115,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       _isLoading = true;
     });
     _chatBox.add(userMessage);
-
     _scrollToBottom();
     _controller.clear();
 
@@ -127,22 +128,19 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     try {
       _client = http.Client();
       
-      // SYSTEM PROMPT: Get the system prompt text from its controller.
+      // Read the user's manual prompt from the controller.
       final systemPrompt = _systemPromptController.text.trim();
 
       final body = {
         'model': _modelController.text,
         'prompt': text,
         'stream': true,
-        if (_conversationContext != null) 'context': _conversationContext,
-        // SYSTEM PROMPT: Add the system prompt to the request if it's not empty.
+        // Use the user's system prompt if it's not empty.
         if (systemPrompt.isNotEmpty) 'system': systemPrompt,
+        if (_conversationContext != null) 'context': _conversationContext,
       };
 
-      final request = http.Request(
-        'POST',
-        Uri.parse('${_baseUrlController.text}/api/generate'),
-      )
+      final request = http.Request('POST', Uri.parse('${_baseUrlController.text}/api/generate'))
         ..headers['Content-Type'] = 'application/json'
         ..body = jsonEncode(body);
 
@@ -150,17 +148,18 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       final lines = streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter());
 
       String streamedResponseText = '';
+      
+      // Restore real-time streaming to the UI.
       await for (final line in lines) {
         if (mounted) {
           try {
             final chunk = jsonDecode(line);
             final part = chunk['response'] ?? '';
             streamedResponseText += part;
-            final updatedAIMessage = ChatMessage(text: streamedResponseText, isUser: false);
+
             setState(() {
-              _messages[_messages.length - 1] = updatedAIMessage;
+              _messages[_messages.length - 1] = ChatMessage(text: streamedResponseText, isUser: false);
             });
-            await _chatBox.put(aiMessageKey, updatedAIMessage);
             _scrollToBottom();
 
             if (chunk['done'] == true) {
@@ -177,13 +176,14 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           }
         }
       }
+
+      final finalMessage = ChatMessage(text: streamedResponseText.trim(), isUser: false);
+      await _chatBox.put(aiMessageKey, finalMessage);
+
     } catch (e) {
       if (mounted) {
-        final partialText = _messages.last.text;
         final finalMessage = _isManuallyStopped
-            ? ChatMessage(
-                text: partialText.trim().isEmpty ? "[Generation stopped by user]" : partialText,
-                isUser: false)
+            ? ChatMessage(text: "[Generation stopped by user]", isUser: false)
             : ChatMessage(text: "Error: ${e.toString()}", isUser: false);
         setState(() {
           _messages[_messages.length - 1] = finalMessage;
@@ -212,7 +212,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Clear Conversation?'),
-        content: const Text('This will delete all messages and reset the conversation context.'),
+        content: const Text('This will delete all messages and reset the conversation context. It will not clear the System Prompt memory.'),
         actions: [
           TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
           TextButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Clear')),
@@ -236,7 +236,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _scrollController.dispose();
     _baseUrlController.dispose();
     _modelController.dispose();
-    // SYSTEM PROMPT: Dispose the new controller and remove its listener to prevent memory leaks.
+    // Dispose the system prompt controller.
     _systemPromptController.removeListener(() {});
     _systemPromptController.dispose();
     _client?.close();
@@ -282,6 +282,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
   }
 
+  // The settings dialog now includes the editable System Prompt again.
   void _showSettingsDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -296,15 +297,15 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 const SizedBox(height: 16.0),
                 TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', border: OutlineInputBorder(), isDense: true)),
                 const SizedBox(height: 16.0),
-                // SYSTEM PROMPT: Add the new text field to the settings dialog.
+                // The editable memory box is back.
                 TextField(
                   controller: _systemPromptController,
                   decoration: const InputDecoration(
                     labelText: 'System Prompt (AI Memory)',
-                    hintText: 'e.g., You are a helpful AI assistant. The user\'s name is John.',
+                    hintText: 'e.g., You are a helpful assistant who always answers in rhymes.',
                     border: OutlineInputBorder(),
                   ),
-                  maxLines: null, // Allows for multiple lines of text.
+                  maxLines: 8,
                 ),
               ],
             ),
@@ -343,7 +344,10 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 onPressed: _stopGeneration,
                 tooltip: 'Stop Generation',
                 iconSize: 28,
-                style: IconButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error, foregroundColor: Theme.of(context).colorScheme.onError),
+                style: ButtonStyle(
+                  backgroundColor: MaterialStateProperty.all(Theme.of(context).colorScheme.error),
+                  foregroundColor: MaterialStateProperty.all(Theme.of(context).colorScheme.onError),
+                ),
               )
             else
               IconButton.filled(
