@@ -49,7 +49,7 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Ollama Flutter',
+      title: 'Cortex',
       // THEME TOGGLE: Use the state variable to set the theme mode.
       themeMode: _themeMode,
       theme: ThemeData(
@@ -329,6 +329,10 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           content: const Text('Copied to clipboard'),
           duration: const Duration(seconds: 2), // Shortened duration
           behavior: SnackBarBehavior.floating, // Make it floating
+          // NEW: To make it higher, we set a vertical offset.
+          // This only works if behavior is floating and context allows it.
+          // Default bottom position is usually around 0. You can increase this.
+          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150), // Example: ~150px from top
         ),
       );
     }
@@ -574,6 +578,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           content: const Text('Voice Mode ON. Speak to chat.'),
           duration: const Duration(seconds: 2), // Shortened duration
           behavior: SnackBarBehavior.floating, // Make it floating
+          // NEW: To make it higher, we set a vertical offset.
+          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150), // Example: ~150px from top
         ),
       );
       // Start listening automatically when voice mode is enabled
@@ -584,6 +590,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           content: const Text('Voice Mode OFF.'),
           duration: const Duration(seconds: 2), // Shortened duration
           behavior: SnackBarBehavior.floating, // Make it floating
+          // NEW: To make it higher, we set a vertical offset.
+          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150), // Example: ~150px from top
         ),
       );
       // Stop listening when voice mode is disabled
@@ -597,7 +605,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Ollama Flutter'),
+        title: const Text('Cortex'),
         shape: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.outlineVariant, width: 0.5)),
         actions: [
           // THEME TOGGLE: Add the new button to the AppBar.
@@ -797,19 +805,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               onPressed: _pickImage,
               tooltip: 'Attach Image',
             ),
-            // Voice Mode Toggle Button with dynamic icons based on state
-            IconButton(
-              icon: Icon(
-                _voiceModeEnabled
-                    ? (_isListening ? Icons.mic : Icons.record_voice_over) // If voice mode, show mic if listening, else record_voice_over
-                    : Icons.mic_none, // If not in voice mode, show mic_none (toggle to voice mode)
-              ),
-              color: _voiceModeEnabled
-                  ? (_isListening ? Theme.of(context).colorScheme.primary : null) // If voice mode, color primary if listening
-                  : null, // No specific color if not in voice mode
-              onPressed: _speechEnabled ? _toggleVoiceMode : null,
-              tooltip: _voiceModeEnabled ? 'Exit Voice Mode' : 'Enter Voice Mode',
-            ),
             // Conditional microphone button for manual speech input
             if (!_voiceModeEnabled) // Only show microphone for manual input when voice mode is off
               IconButton(
@@ -818,6 +813,19 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 onPressed: !_speechEnabled ? null : (_isListening ? _stopListening : _startListeningManual),
                 tooltip: _isListening ? 'Stop listening' : 'Listen',
               ),
+            // Voice Mode Toggle Button with dynamic icons based on state
+            IconButton(
+              icon: Icon(
+                _voiceModeEnabled
+                    ? (_isListening ? Icons.mic : Icons.record_voice_over) // If voice mode, show mic if listening, else record_voice_over
+                    : Icons.voice_chat, // If not in voice mode, show voice_chat (toggle to voice mode)
+              ),
+              color: _voiceModeEnabled
+                  ? (_isListening ? Theme.of(context).colorScheme.primary : null) // If voice mode, color primary if listening
+                  : null, // No specific color if not in voice mode
+              onPressed: _speechEnabled ? _toggleVoiceMode : null,
+              tooltip: _voiceModeEnabled ? 'Exit Voice Mode' : 'Enter Voice Mode',
+            ),
             Expanded(
               child: TextField(
                 controller: _controller,
