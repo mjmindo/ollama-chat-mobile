@@ -19,23 +19,19 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
 
-  // NEW: Register all adapters
   Hive.registerAdapter(ConversationAdapter());
   Hive.registerAdapter(ChatMessageAdapter());
 
-  // NEW: Open all necessary boxes
   await Hive.openBox<Conversation>('conversations');
   await Hive.openBox<ChatMessage>('messages');
-  await Hive.openBox('appState'); // For settings
+  await Hive.openBox('appState');
 
   runApp(const MyApp());
 }
 
-// THEME TOGGLE: Convert MyApp to a StatefulWidget to manage theme state.
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
 
-  // THEME TOGGLE: Create a static method for child widgets to access the state.
   static _MyAppState of(BuildContext context) =>
       context.findAncestorStateOfType<_MyAppState>()!;
 
@@ -49,7 +45,6 @@ class _MyAppState extends State<MyApp> {
   @override
   void initState() {
     super.initState();
-    // Load the saved theme mode
     final appStateBox = Hive.box('appState');
     final theme = appStateBox.get('themeMode');
     if (theme == 'light') {
@@ -65,7 +60,6 @@ class _MyAppState extends State<MyApp> {
     setState(() {
       _themeMode = themeMode;
     });
-    // Save the theme mode
     final appStateBox = Hive.box('appState');
     appStateBox.put('themeMode', themeMode.name);
   }
@@ -95,29 +89,24 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
-// NEW: Model for a conversation session
 @HiveType(typeId: 1)
 class Conversation extends HiveObject {
   @HiveField(0)
   String id;
-
   @HiveField(1)
   String title;
-
   @HiveField(2)
   List<int>? context;
-
   @HiveField(3)
   DateTime createdAt;
 
   Conversation({required this.id, required this.title, this.context, required this.createdAt});
 }
 
-
 @HiveType(typeId: 0)
 class ChatMessage extends HiveObject {
   @HiveField(0)
-  String text; // <-- 'final' removed
+  String text; // Made mutable for streaming
   @HiveField(1)
   final bool isUser;
   @HiveField(2)
@@ -137,7 +126,6 @@ class OllamaChatPage extends StatefulWidget {
 
 class _OllamaChatPageState extends State<OllamaChatPage> {
   final _controller = TextEditingController();
-  // List<ChatMessage> _messages = []; // This will now be dynamically loaded
   bool _isLoading = false;
   final ScrollController _scrollController = ScrollController();
   late TextEditingController _baseUrlController;
@@ -147,19 +135,15 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   bool _shouldThink = false;
   File? _selectedImage;
 
-
   http.Client? _client;
   bool _isManuallyStopped = false;
 
-  // NEW: Hive boxes
   late Box<ChatMessage> _messageBox;
   late Box<Conversation> _conversationBox;
   late Box _appStateBox;
   
-  // NEW: State for multi-conversation
   Conversation? _activeConversation;
   List<Conversation> _conversations = [];
-
 
   final SpeechToText _speechToText = SpeechToText();
   final FlutterTts _flutterTts = FlutterTts();
@@ -171,6 +155,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   double _speechPitch = 1.0;
   bool _voiceModeEnabled = false;
 
+  // State for scroll buttons
+  bool _showScrollDownButton = false;
+  bool _showScrollUpButton = false;
 
   @override
   void initState() {
@@ -179,7 +166,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _conversationBox = Hive.box<Conversation>('conversations');
     _appStateBox = Hive.box('appState');
     
-    // --- PERSISTENCE: Load all settings from Hive ---
     _baseUrlController = TextEditingController(text: _appStateBox.get('baseUrl', defaultValue: 'http://localhost:11434'));
     _modelController = TextEditingController(text: _appStateBox.get('modelName', defaultValue: 'gemma:2b'));
     _systemPromptController = TextEditingController(text: _appStateBox.get('systemPrompt', defaultValue: ''));
@@ -191,7 +177,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
     _systemPromptController.addListener(() => _appStateBox.put('systemPrompt', _systemPromptController.text));
     
-    // NEW: Load conversations and set active one
     _loadConversations();
     final lastActiveId = _appStateBox.get('lastActiveConversationId');
     if (lastActiveId != null && _conversationBox.containsKey(lastActiveId)) {
@@ -201,7 +186,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     } else {
       _createNewConversation();
     }
-
+    
+    // Register the scroll listener
+    _scrollController.addListener(_scrollListener);
 
     _initSpeech();
     _initTts();
@@ -211,20 +198,17 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
   
-  // NEW: Get messages for the active conversation
   List<ChatMessage> get _messages {
     if (_activeConversation == null) return [];
     return _messageBox.values.where((msg) => msg.conversationId == _activeConversation!.id).toList();
   }
   
-  // NEW: Load all conversations from Hive
   void _loadConversations() {
     _conversations = _conversationBox.values.toList();
-    _conversations.sort((a, b) => b.createdAt.compareTo(a.createdAt)); // Most recent first
+    _conversations.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     setState(() {});
   }
   
-  // NEW: Set the active conversation
   void _setActiveConversation(String id) {
     setState(() {
       _activeConversation = _conversationBox.get(id);
@@ -233,7 +217,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _scrollToBottom();
   }
   
-  // NEW: Create a new conversation
   void _createNewConversation() {
     final newId = uuid.v4();
     final newConversation = Conversation(
@@ -246,9 +229,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _setActiveConversation(newId);
   }
 
-  // NEW: Delete a conversation
   Future<void> _deleteConversation(String id) async {
-    // Prevent deleting the last conversation
     if(_conversationBox.length <= 1) {
        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Cannot delete the last conversation.")));
        return;
@@ -269,7 +250,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
-  // NEW: Rename a conversation
   Future<void> _renameConversation(Conversation conversation) async {
     final titleController = TextEditingController(text: conversation.title);
     final newTitle = await showDialog<String>(
@@ -291,23 +271,18 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
-
   void _initTts() {
     _flutterTts.setStartHandler(() {
       if (mounted) setState(() => _isSpeaking = true);
     });
-
     _flutterTts.setCompletionHandler(() {
       if (mounted) {
         setState(() => _isSpeaking = false);
         Future.delayed(const Duration(milliseconds: 100), () {
-          if (_voiceModeEnabled && !_isLoading) {
-            _startListeningForVoiceMode();
-          }
+          if (_voiceModeEnabled && !_isLoading) _startListeningForVoiceMode();
         });
       }
     });
-
     _flutterTts.setErrorHandler((msg) {
       if (mounted) setState(() => _isSpeaking = false);
     });
@@ -333,15 +308,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   Future<void> _startListeningForVoiceMode() async {
     if (!_speechEnabled || _isLoading || _isSpeaking || _isListening) return;
-
     _controller.clear();
-
     await _speechToText.listen(
       onResult: (result) {
         _controller.text = result.recognizedWords;
-        if (result.finalResult && _voiceModeEnabled) {
-          _sendMessage(_controller.text);
-        }
+        if (result.finalResult && _voiceModeEnabled) _sendMessage(_controller.text);
       },
       listenFor: const Duration(minutes: 5),
       pauseFor: const Duration(seconds: 3),
@@ -402,7 +373,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   void _clearImage() => setState(() => _selectedImage = null);
 
-
   Future<void> _sendMessage(String text) async {
     if (_activeConversation == null) return;
     final currentConversation = _activeConversation!;
@@ -424,31 +394,25 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
     _messageBox.add(userMessage);
 
-    setState(() {
-      _isLoading = true;
-      // The message list is rebuilt dynamically, so we just need to trigger a rebuild
-    });
+    setState(() => _isLoading = true);
 
     _scrollToBottom();
     _controller.clear();
     
-    // Auto-rename conversation based on first message
     if (_messages.length == 1 && currentConversation.title == "New Chat") {
       final newTitle = text.trim().length > 30 ? "${text.trim().substring(0, 30)}..." : text.trim();
       if(newTitle.isNotEmpty) {
         currentConversation.title = newTitle;
         await currentConversation.save();
-        _loadConversations(); // Refresh drawer list
+        _loadConversations();
       }
     }
-
 
     final aiMessagePlaceholder = ChatMessage(text: '', isUser: false, conversationId: currentConversation.id);
     final int aiMessageKey = await _messageBox.add(aiMessagePlaceholder);
     
-    setState(() {}); // Rebuild to show placeholder
+    setState(() {});
     _scrollToBottom();
-
 
     try {
       _client = http.Client();
@@ -468,16 +432,14 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         'system': systemPrompt.isNotEmpty ? systemPrompt : null,
         'think': _shouldThink,
         'images': base64Image != null ? [base64Image] : null,
-        'context': currentConversation.context, // Use conversation-specific context
+        'context': currentConversation.context,
         'stream': true,
       };
-
       body.removeWhere((key, value) => value == null);
 
       final request = http.Request('POST', Uri.parse('${_baseUrlController.text}/api/generate'))
         ..headers['Content-Type'] = 'application/json'
         ..body = jsonEncode(body);
-
 
       final streamedResponse = await _client!.send(request);
       final lines = streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter());
@@ -492,14 +454,13 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
             final part = chunk['response'] ?? '';
             streamedResponseText += part;
             
-            // Get the placeholder from the box and update it
             final currentAIMessage = _messageBox.get(aiMessageKey);
             if(currentAIMessage != null) {
               currentAIMessage.text = streamedResponseText;
               await _messageBox.put(aiMessageKey, currentAIMessage);
             }
 
-            setState(() {}); // This will rebuild the list and show the streaming text
+            setState(() {});
             _scrollToBottom();
 
             if (chunk['done'] == true && chunk['context'] != null) {
@@ -511,7 +472,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         }
       }
       
-      // Update the conversation's context
       if (newContext != null) {
         currentConversation.context = newContext;
         await currentConversation.save();
@@ -522,12 +482,15 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       }
 
     } catch (e) {
-      final finalMessageText = _isManuallyStopped
-            ? "[Generation stopped by user]"
-            : "Error: ${e.toString()}";
-      final finalMessage = ChatMessage(text: finalMessageText, isUser: false, conversationId: currentConversation.id);
-      await _messageBox.put(aiMessageKey, finalMessage);
-      if (_voiceModeEnabled) await _speak(finalMessage.text);
+      if (mounted && !_isManuallyStopped) {
+        final finalMessageText = "Error: ${e.toString()}";
+        final aiMessage = _messageBox.get(aiMessageKey);
+        if (aiMessage != null) {
+          aiMessage.text = finalMessageText;
+          await _messageBox.put(aiMessageKey, aiMessage);
+        }
+        if (_voiceModeEnabled) await _speak(finalMessageText);
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
       _client?.close();
@@ -568,16 +531,12 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
 
     if (confirmed ?? false) {
-      // Clear context
       _activeConversation!.context = null;
       await _activeConversation!.save();
-
-      // Delete messages
       final messagesToDelete = _messageBox.values.where((msg) => msg.conversationId == _activeConversation!.id).toList();
       for (var msg in messagesToDelete) {
         await msg.delete();
       }
-
       setState(() {});
       await _stopListening();
       await _stopSpeaking();
@@ -588,7 +547,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   @override
   void dispose() {
     _controller.dispose();
-    _scrollController.dispose();
     _baseUrlController.dispose();
     _modelController.dispose();
     _systemPromptController.removeListener(() {});
@@ -597,16 +555,45 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _client?.close();
     _speechToText.cancel();
     _flutterTts.stop();
+    // Clean up the scroll listener
+    _scrollController.removeListener(_scrollListener);
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void _scrollToBottom() {
+  void _scrollListener() {
+    // Show/hide scroll-to-bottom button
+    if (_scrollController.position.pixels < _scrollController.position.maxScrollExtent - 200) {
+      if (!_showScrollDownButton) setState(() => _showScrollDownButton = true);
+    } else {
+      if (_showScrollDownButton) setState(() => _showScrollDownButton = false);
+    }
+    // Show/hide scroll-to-top button
+    if (_scrollController.position.pixels > 200) {
+      if (!_showScrollUpButton) setState(() => _showScrollUpButton = true);
+    } else {
+      if (_showScrollUpButton) setState(() => _showScrollUpButton = false);
+    }
+  }
+
+  void _scrollToTop() {
+    _scrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 500),
+      curve: Curves.easeOut,
+    );
+  }
+
+  void _scrollToBottom({bool isManual = false}) {
+    final duration = isManual ? const Duration(milliseconds: 500) : const Duration(milliseconds: 300);
+    final curve = isManual ? Curves.easeOut : Curves.easeIn;
+    
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
+          duration: duration,
+          curve: curve,
         );
       }
     });
@@ -615,7 +602,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   void _toggleVoiceMode() async {
     setState(() => _voiceModeEnabled = !_voiceModeEnabled);
     await _appStateBox.put('voiceModeEnabled', _voiceModeEnabled);
-
     if (_voiceModeEnabled) {
        _startListeningForVoiceMode();
     } else {
@@ -624,10 +610,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
-
   @override
   Widget build(BuildContext context) {
-    // Get messages for the current conversation for this build pass
     final currentMessages = _messages;
     
     return Scaffold(
@@ -636,122 +620,124 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         shape: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.outlineVariant, width: 0.5)),
         actions: [
           IconButton(
-            icon: Icon(
-              Theme.of(context).brightness == Brightness.dark
-                  ? Icons.light_mode_outlined
-                  : Icons.dark_mode_outlined,
-            ),
+            icon: Icon(Theme.of(context).brightness == Brightness.dark ? Icons.light_mode_outlined : Icons.dark_mode_outlined),
             tooltip: 'Toggle Theme',
-            onPressed: () {
-              final newTheme = Theme.of(context).brightness == Brightness.dark
-                  ? ThemeMode.light
-                  : ThemeMode.dark;
-              MyApp.of(context).changeTheme(newTheme);
-            },
+            onPressed: () => MyApp.of(context).changeTheme(Theme.of(context).brightness == Brightness.dark ? ThemeMode.light : ThemeMode.dark),
           ),
           IconButton(icon: const Icon(Icons.delete_sweep_outlined), tooltip: 'Clear Current Conversation', onPressed: _clearCurrentConversation),
           IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Settings', onPressed: () => _showSettingsDialog(context)),
         ],
       ),
       drawer: _buildConversationDrawer(),
-      body: Column(
+      body: Stack(
         children: [
-          Expanded(
-            child: currentMessages.isEmpty
-                ? _buildEmptyState()
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.all(8.0),
-                    itemCount: currentMessages.length,
-                    itemBuilder: (context, index) {
-                      final message = currentMessages[index];
-                      // Show typing indicator on the last message if it's an empty AI response and we're loading
-                      if (index == currentMessages.length - 1 && _isLoading && message.text.isEmpty && !message.isUser) {
-                        return const TypingIndicator();
-                      }
-                      return ChatBubble(
-                        message: message,
-                        onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
-                        onCopy: message.isUser ? null : _copyToClipboard,
-                      );
-                    },
-                  ),
-          ),
-          if (_selectedImage != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-              child: Stack(
-                children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Theme.of(context).colorScheme.outline),
-                      borderRadius: BorderRadius.circular(8.0),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8.0),
-                      child: Image.file(_selectedImage!, height: 100, width: 100, fit: BoxFit.cover),
-                    ),
-                  ),
-                  Positioned(
-                    top: 4,
-                    right: 4,
-                    child: InkWell(
-                      onTap: _clearImage,
-                      child: Container(
-                        decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
-                        child: const Icon(Icons.close, color: Colors.white, size: 18),
+          Column(
+            children: [
+              Expanded(
+                child: currentMessages.isEmpty
+                    ? _buildEmptyState()
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 72), // Add padding to bottom
+                        itemCount: currentMessages.length,
+                        itemBuilder: (context, index) {
+                          final message = currentMessages[index];
+                          if (index == currentMessages.length - 1 && _isLoading && message.text.isEmpty && !message.isUser) {
+                            return const TypingIndicator();
+                          }
+                          return ChatBubble(
+                            message: message,
+                            onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
+                            onCopy: message.isUser ? null : _copyToClipboard,
+                          );
+                        },
                       ),
+              ),
+              if (_selectedImage != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                  child: Stack(
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(border: Border.all(color: Theme.of(context).colorScheme.outline), borderRadius: BorderRadius.circular(8.0)),
+                        child: ClipRRect(borderRadius: BorderRadius.circular(8.0), child: Image.file(_selectedImage!, height: 100, width: 100, fit: BoxFit.cover)),
+                      ),
+                      Positioned(
+                        top: 4, right: 4,
+                        child: InkWell(
+                          onTap: _clearImage,
+                          child: Container(
+                            decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
+                            child: const Icon(Icons.close, color: Colors.white, size: 18),
+                          ),
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              if (_voiceModeEnabled)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  child: VoiceModeFeedbackOverlay(isListening: _isListening, isSpeaking: _isSpeaking, isLoading: _isLoading, onExitVoiceMode: _toggleVoiceMode),
+                ),
+              _buildInputArea(context),
+            ],
+          ),
+          
+          Positioned(
+            right: 10.0,
+            bottom: 170.0,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (_showScrollUpButton)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 16.0),
+                    child: FloatingActionButton.small(
+                      onPressed: _scrollToTop,
+                      tooltip: 'Scroll to Top',
+                      heroTag: 'scroll_top_btn',
+                      child: const Icon(Icons.arrow_upward),
                     ),
-                  )
-                ],
-              ),
+                  ),
+                if (_showScrollDownButton)
+                  FloatingActionButton.small(
+                    onPressed: () => _scrollToBottom(isManual: true),
+                    tooltip: 'Scroll to Bottom',
+                    heroTag: 'scroll_down_btn',
+                    child: const Icon(Icons.arrow_downward),
+                  ),
+              ],
             ),
-          // REPOSITIONED: Voice mode UI is now here, above the input area.
-          if (_voiceModeEnabled)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-              child: VoiceModeFeedbackOverlay(
-                isListening: _isListening,
-                isSpeaking: _isSpeaking,
-                isLoading: _isLoading,
-                onExitVoiceMode: _toggleVoiceMode,
+          ),
+          
+          Positioned(
+            right: 10.0,
+            bottom: 90.0,
+            child: FloatingActionButton(
+              onPressed: _speechEnabled ? _toggleVoiceMode : null,
+              backgroundColor: _voiceModeEnabled && _isListening ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.surfaceContainerHighest,
+              elevation: 4.0,
+              shape: const CircleBorder(),
+              heroTag: 'voice_mode_btn',
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                transitionBuilder: (Widget child, Animation<double> animation) => ScaleTransition(scale: animation, child: child),
+                child: Icon(
+                  _voiceModeEnabled ? (_isListening ? Icons.mic : Icons.record_voice_over) : Icons.voice_chat,
+                  key: ValueKey<bool>(_voiceModeEnabled && _isListening),
+                  color: _voiceModeEnabled && _isListening ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onSurface,
+                ),
               ),
+              tooltip: _voiceModeEnabled ? 'Exit Voice Mode' : 'Enter Voice Mode',
             ),
-          _buildInputArea(context),
+          ),
         ],
       ),
-      floatingActionButton: Padding(
-        padding: const EdgeInsets.only(bottom: 80.0),
-        child: FloatingActionButton(
-          onPressed: _speechEnabled ? _toggleVoiceMode : null,
-          backgroundColor: _voiceModeEnabled && _isListening
-              ? Theme.of(context).colorScheme.primary
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
-          elevation: 4.0,
-          shape: const CircleBorder(),
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (Widget child, Animation<double> animation) {
-              return ScaleTransition(scale: animation, child: child);
-            },
-            child: Icon(
-              _voiceModeEnabled
-                  ? (_isListening ? Icons.mic : Icons.record_voice_over)
-                  : Icons.voice_chat,
-              key: ValueKey<bool>(_voiceModeEnabled && _isListening),
-              color: _voiceModeEnabled && _isListening
-                  ? Theme.of(context).colorScheme.onPrimary
-                  : Theme.of(context).colorScheme.onSurface,
-            ),
-          ),
-          tooltip: _voiceModeEnabled ? 'Exit Voice Mode' : 'Enter Voice Mode',
-        ),
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 
-  // NEW: Drawer for managing conversations
   Widget _buildConversationDrawer() {
     return Drawer(
       child: SafeArea(
@@ -762,7 +748,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               child: OutlinedButton.icon(
                 onPressed: () {
                   _createNewConversation();
-                  Navigator.of(context).pop(); // Close drawer
+                  Navigator.of(context).pop();
                 },
                 icon: const Icon(Icons.add),
                 label: const Text('New Chat'),
@@ -782,15 +768,12 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                     selectedTileColor: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.5),
                     onTap: () {
                       _setActiveConversation(conversation.id);
-                      Navigator.of(context).pop(); // Close drawer
+                      Navigator.of(context).pop();
                     },
                     trailing: PopupMenuButton<String>(
                       onSelected: (value) {
-                        if (value == 'rename') {
-                          _renameConversation(conversation);
-                        } else if (value == 'delete') {
-                          _deleteConversation(conversation.id);
-                        }
+                        if (value == 'rename') _renameConversation(conversation);
+                        else if (value == 'delete') _deleteConversation(conversation.id);
                       },
                       itemBuilder: (context) => [
                         const PopupMenuItem(value: 'rename', child: Text('Rename')),
@@ -807,7 +790,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
   }
 
-
   Widget _buildEmptyState() {
     return const Center(
       child: Column(
@@ -815,16 +797,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         children: [
           Icon(Icons.auto_awesome, size: 64.0),
           SizedBox(height: 16.0),
-          Text(
-            "Welcome to HAL 9000",
-            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-          ),
+          Text("Welcome to HAL 9000", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
           SizedBox(height: 8.0),
-          Text(
-            "Start a new chat from the drawer,\ntype a message, or use voice mode.",
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 16),
-          ),
+          Text("Start a new chat from the drawer,\ntype a message, or use voice mode.", textAlign: TextAlign.center, style: TextStyle(fontSize: 16)),
         ],
       ),
     );
@@ -845,31 +820,15 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   children: [
                     Text('Connection', style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 8.0),
-                    TextField(
-                      controller: _baseUrlController,
-                      decoration: const InputDecoration(labelText: 'HAL 9000 Base URL', border: OutlineInputBorder(), isDense: true),
-                      onChanged: (value) => _appStateBox.put('baseUrl', value),
-                    ),
+                    TextField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'HAL 9000 Base URL', border: OutlineInputBorder(), isDense: true), onChanged: (value) => _appStateBox.put('baseUrl', value)),
                     const Divider(height: 32.0),
                     Text('Model', style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 8.0),
-                    TextField(
-                      controller: _modelController,
-                      decoration: const InputDecoration(labelText: 'Model Name', border: OutlineInputBorder(), isDense: true),
-                      onChanged: (value) => _appStateBox.put('modelName', value),
-                    ),
+                    TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', border: OutlineInputBorder(), isDense: true), onChanged: (value) => _appStateBox.put('modelName', value)),
                     const SizedBox(height: 16.0),
-                    TextField(
-                      controller: _systemPromptController,
-                      decoration: const InputDecoration(labelText: 'System Prompt (AI Memory)', border: OutlineInputBorder()),
-                      maxLines: 8,
-                    ),
+                    TextField(controller: _systemPromptController, decoration: const InputDecoration(labelText: 'System Prompt (AI Memory)', border: OutlineInputBorder()), maxLines: 8),
                     const SizedBox(height: 16.0),
-                    TextField(
-                      controller: _suffixController,
-                      decoration: const InputDecoration(labelText: 'Suffix', hintText: 'Text to append after response', border: OutlineInputBorder()),
-                      onChanged: (value) => _appStateBox.put('suffix', value),
-                    ),
+                    TextField(controller: _suffixController, decoration: const InputDecoration(labelText: 'Suffix', hintText: 'Text to append after response', border: OutlineInputBorder()), onChanged: (value) => _appStateBox.put('suffix', value)),
                     const SizedBox(height: 16.0),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -884,32 +843,21 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                         ),
                       ],
                     ),
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4.0),
-                      child: Text("Note: For supported models only.", style: Theme.of(context).textTheme.bodySmall),
-                    ),
+                    Padding(padding: const EdgeInsets.only(top: 4.0), child: Text("Note: For supported models only.", style: Theme.of(context).textTheme.bodySmall)),
                     const Divider(height: 32.0),
                     Text('Speech', style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 8.0),
                     Text('Speech Speed', style: Theme.of(context).textTheme.labelLarge),
-                    Slider(
-                      value: _speechRate, min: 0.1, max: 2.0, divisions: 19,
-                      label: _speechRate.toStringAsFixed(1),
-                      onChanged: (newRate) {
+                    Slider(value: _speechRate, min: 0.1, max: 2.0, divisions: 19, label: _speechRate.toStringAsFixed(1), onChanged: (newRate) {
                         dialogSetState(() => _speechRate = newRate);
                         _appStateBox.put('speechRate', newRate);
-                      },
-                    ),
+                      }),
                     const SizedBox(height: 16.0),
                     Text('Speech Pitch', style: Theme.of(context).textTheme.labelLarge),
-                    Slider(
-                      value: _speechPitch, min: 0.5, max: 2.0, divisions: 15,
-                      label: _speechPitch.toStringAsFixed(1),
-                      onChanged: (newPitch) {
+                    Slider(value: _speechPitch, min: 0.5, max: 2.0, divisions: 15, label: _speechPitch.toStringAsFixed(1), onChanged: (newPitch) {
                         dialogSetState(() => _speechPitch = newPitch);
                         _appStateBox.put('speechPitch', newPitch);
-                      },
-                    ),
+                      }),
                   ],
                 ),
               ),
@@ -929,11 +877,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 8.0, left: 8.0, right: 8.0, top: 8.0),
         child: Row(
           children: [
-            IconButton(
-              icon: const Icon(Icons.attach_file_outlined),
-              onPressed: _isLoading ? null : _pickImage,
-              tooltip: 'Attach Image',
-            ),
+            IconButton(icon: const Icon(Icons.attach_file_outlined), onPressed: _isLoading ? null : _pickImage, tooltip: 'Attach Image'),
             if (!_voiceModeEnabled)
               IconButton(
                 icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
@@ -967,12 +911,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 ),
               )
             else if (!_voiceModeEnabled)
-              IconButton.filled(
-                icon: const Icon(Icons.send_rounded),
-                onPressed: () => _sendMessage(_controller.text),
-                tooltip: 'Send Message',
-                iconSize: 28,
-              ),
+              IconButton.filled(icon: const Icon(Icons.send_rounded), onPressed: () => _sendMessage(_controller.text), tooltip: 'Send Message', iconSize: 28),
           ],
         ),
       ),
@@ -985,12 +924,7 @@ class ChatBubble extends StatelessWidget {
   final void Function(String text)? onSpeak;
   final void Function(String text)? onCopy;
 
-  const ChatBubble({
-    required this.message,
-    this.onSpeak,
-    this.onCopy,
-    super.key,
-  });
+  const ChatBubble({required this.message, this.onSpeak, this.onCopy, super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -999,15 +933,8 @@ class ChatBubble extends StatelessWidget {
 
     final markdownStyle = MarkdownStyleSheet.fromTheme(theme).copyWith(
       p: theme.textTheme.bodyLarge,
-      code: theme.textTheme.bodyMedium!.copyWith(
-        fontFamily: 'monospace',
-        backgroundColor: theme.colorScheme.onSurface.withOpacity(0.1),
-      ),
-      codeblockDecoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(8.0),
-        border: Border.all(color: theme.dividerColor),
-      ),
+      code: theme.textTheme.bodyMedium!.copyWith(fontFamily: 'monospace', backgroundColor: theme.colorScheme.onSurface.withOpacity(0.1)),
+      codeblockDecoration: BoxDecoration(color: theme.colorScheme.surface, borderRadius: BorderRadius.circular(8.0), border: Border.all(color: theme.dividerColor)),
     );
 
     return Column(
@@ -1017,19 +944,12 @@ class ChatBubble extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
           children: [
-            if (!isUser)
-              Padding(
-                padding: const EdgeInsets.only(right: 8.0, top: 4.0),
-                child: CircleAvatar(child: Icon(Icons.auto_awesome, color: theme.colorScheme.onPrimaryContainer)),
-              ),
+            if (!isUser) Padding(padding: const EdgeInsets.only(right: 8.0, top: 4.0), child: CircleAvatar(child: Icon(Icons.auto_awesome, color: theme.colorScheme.onPrimaryContainer))),
             Flexible(
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 4.0),
                 padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
-                decoration: BoxDecoration(
-                  color: isUser ? theme.colorScheme.primaryContainer : theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(16.0),
-                ),
+                decoration: BoxDecoration(color: isUser ? theme.colorScheme.primaryContainer : theme.colorScheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(16.0)),
                 child: SelectionArea(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1037,20 +957,9 @@ class ChatBubble extends StatelessWidget {
                       if (message.imagePath != null)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8.0),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8.0),
-                            child: Image.file(
-                              File(message.imagePath!),
-                              height: 150,
-                              fit: BoxFit.cover,
-                            ),
-                          ),
+                          child: ClipRRect(borderRadius: BorderRadius.circular(8.0), child: Image.file(File(message.imagePath!), height: 150, fit: BoxFit.cover)),
                         ),
-                      MarkdownBody(
-                        data: message.text,
-                        styleSheet: markdownStyle,
-                        selectable: true,
-                      ),
+                      MarkdownBody(data: message.text, styleSheet: markdownStyle, selectable: true),
                       if (!isUser && message.text.isNotEmpty && (onSpeak != null || onCopy != null))
                         Padding(
                           padding: const EdgeInsets.only(top: 8.0),
@@ -1058,22 +967,8 @@ class ChatBubble extends StatelessWidget {
                             mainAxisAlignment: MainAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              if (onSpeak != null)
-                                IconButton(
-                                  icon: const Icon(Icons.volume_up_outlined),
-                                  iconSize: 20,
-                                  visualDensity: VisualDensity.compact,
-                                  tooltip: 'Read aloud',
-                                  onPressed: () => onSpeak!(message.text),
-                                ),
-                              if (onCopy != null)
-                                IconButton(
-                                  icon: const Icon(Icons.copy_outlined),
-                                  iconSize: 20,
-                                  visualDensity: VisualDensity.compact,
-                                  tooltip: 'Copy text',
-                                  onPressed: () => onCopy!(message.text),
-                                ),
+                              if (onSpeak != null) IconButton(icon: const Icon(Icons.volume_up_outlined), iconSize: 20, visualDensity: VisualDensity.compact, tooltip: 'Read aloud', onPressed: () => onSpeak!(message.text)),
+                              if (onCopy != null) IconButton(icon: const Icon(Icons.copy_outlined), iconSize: 20, visualDensity: VisualDensity.compact, tooltip: 'Copy text', onPressed: () => onCopy!(message.text)),
                             ],
                           ),
                         )
@@ -1082,11 +977,7 @@ class ChatBubble extends StatelessWidget {
                 ),
               ),
             ),
-            if (isUser)
-              const Padding(
-                padding: EdgeInsets.only(left: 8.0, top: 4.0),
-                child: CircleAvatar(child: Icon(Icons.person_outline)),
-              ),
+            if (isUser) const Padding(padding: EdgeInsets.only(left: 8.0, top: 4.0), child: CircleAvatar(child: Icon(Icons.person_outline))),
           ],
         ),
       ],
@@ -1107,10 +998,7 @@ class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProv
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat();
   }
 
   @override
@@ -1126,36 +1014,17 @@ class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProv
       padding: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 0.0),
       child: Row(
         children: [
-           Padding(
-            padding: const EdgeInsets.only(right: 8.0, top: 4.0),
-            child: CircleAvatar(child: Icon(Icons.auto_awesome, color: theme.colorScheme.onPrimaryContainer)),
-          ),
+          Padding(padding: const EdgeInsets.only(right: 8.0, top: 4.0), child: CircleAvatar(child: Icon(Icons.auto_awesome, color: theme.colorScheme.onPrimaryContainer))),
           Container(
             margin: const EdgeInsets.symmetric(vertical: 4.0),
             padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(16.0),
-            ),
+            decoration: BoxDecoration(color: theme.colorScheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(16.0)),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: List.generate(3, (index) {
                 return FadeTransition(
-                  opacity: Tween(begin: 0.3, end: 1.0).animate(
-                    CurvedAnimation(
-                      parent: _controller,
-                      curve: Interval(index * 0.2, (index * 0.2) + 0.6, curve: Curves.easeInOut),
-                    ),
-                  ),
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 3),
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.onSurface,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
+                  opacity: Tween(begin: 0.3, end: 1.0).animate(CurvedAnimation(parent: _controller, curve: Interval(index * 0.2, (index * 0.2) + 0.6, curve: Curves.easeInOut))),
+                  child: Container(margin: const EdgeInsets.symmetric(horizontal: 3), width: 8, height: 8, decoration: BoxDecoration(color: theme.colorScheme.onSurface, shape: BoxShape.circle)),
                 );
               }),
             ),
@@ -1166,34 +1035,16 @@ class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProv
   }
 }
 
-// REPOSITIONED: This widget is no longer an overlay but an inline component.
 class VoiceModeFeedbackOverlay extends StatelessWidget {
   final bool isListening;
   final bool isSpeaking;
   final bool isLoading;
   final VoidCallback onExitVoiceMode;
 
-  const VoiceModeFeedbackOverlay({
-    super.key,
-    required this.isListening,
-    required this.isSpeaking,
-    required this.isLoading,
-    required this.onExitVoiceMode,
-  });
+  const VoiceModeFeedbackOverlay({super.key, required this.isListening, required this.isSpeaking, required this.isLoading, required this.onExitVoiceMode});
 
-  String get _statusText {
-    if (isLoading) return "Processing...";
-    if (isSpeaking) return "Speaking...";
-    if (isListening) return "Listening...";
-    return "Voice Mode Active";
-  }
-
-  IconData get _statusIcon {
-    if (isLoading) return Icons.hourglass_empty;
-    if (isSpeaking) return Icons.volume_up;
-    if (isListening) return Icons.mic;
-    return Icons.record_voice_over;
-  }
+  String get _statusText => isLoading ? "Processing..." : (isSpeaking ? "Speaking..." : (isListening ? "Listening..." : "Voice Mode Active"));
+  IconData get _statusIcon => isLoading ? Icons.hourglass_empty : (isSpeaking ? Icons.volume_up : (isListening ? Icons.mic : Icons.record_voice_over));
 
   @override
   Widget build(BuildContext context) {
@@ -1208,21 +1059,8 @@ class VoiceModeFeedbackOverlay extends StatelessWidget {
           children: [
             Icon(_statusIcon, color: theme.colorScheme.onPrimaryContainer, size: 24),
             const SizedBox(width: 12.0),
-            Expanded(
-              child: Text(
-                _statusText,
-                style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.onPrimaryContainer, fontWeight: FontWeight.bold),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.close),
-              iconSize: 20,
-              visualDensity: VisualDensity.compact,
-              color: theme.colorScheme.onPrimaryContainer,
-              onPressed: onExitVoiceMode,
-              tooltip: 'Exit Voice Mode',
-            ),
+            Expanded(child: Text(_statusText, style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.onPrimaryContainer, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
+            IconButton(icon: const Icon(Icons.close), iconSize: 20, visualDensity: VisualDensity.compact, color: theme.colorScheme.onPrimaryContainer, onPressed: onExitVoiceMode, tooltip: 'Exit Voice Mode'),
           ],
         ),
       ),
