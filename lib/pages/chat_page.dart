@@ -336,6 +336,13 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   Future<void> _stopSpeaking() async {
     await _flutterTts.stop();
+    
+    if (mounted) {
+      setState(() {
+        _isSpeaking = false;
+        _currentlySpeakingMessageKey = null;
+      });
+    }
   }
 
   void _stopAllVoiceActivity() {
@@ -874,7 +881,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 tooltip: 'Attach Image'),
             if (!_voiceModeEnabled)
               IconButton(
-                icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
+                icon: Icon(_isListening ? Icons.mic : Icons.mic_off),
                 color:
                     _isListening ? Theme.of(context).colorScheme.primary : null,
                 onPressed: !_speechEnabled || _isLoading || _isSpeaking
