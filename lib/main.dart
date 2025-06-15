@@ -532,7 +532,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                         itemBuilder: (context, index) {
                           final message = _messages[index];
                           // NEW: If it's the last message and we are loading, show typing indicator
-                          if (index == _messages.length - 1 && _isLoading && !message.isUser) {
+                          if (index == _messages.length - 1 && _isLoading && message.text.isEmpty && !message.isUser) {
                             return const TypingIndicator();
                           }
                           return ChatBubble(
