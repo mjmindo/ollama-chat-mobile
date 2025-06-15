@@ -1,4 +1,4 @@
-# HAL 9000 - A Flutter Chat Client for Ollama
+# HAL - A Flutter Chat Client for Ollama
 
 **A feature-rich, local-first, and cross-platform chat application for interacting with Ollama's large language models.**
 
@@ -6,9 +6,9 @@
 
 ## 📖 Overview
 
-HAL 9000 is a Flutter-based front-end for **[Ollama](https://ollama.com/)**, allowing you to run powerful language models locally on your machine. This application provides a clean, intuitive, and highly customizable interface to chat with your models. It saves all your conversations and settings on your device, ensuring privacy and offline access.
+HAL is a Flutter-based front-end for **[Ollama](https://ollama.com/)**, allowing you to run powerful language models locally on your machine. This application provides a clean, intuitive, and highly customizable interface to chat with your models. It saves all your conversations and settings on your device, ensuring privacy and offline access.
 
-With support for multimodal models, voice-to-text, text-to-speech, and extensive settings, HAL 9000 aims to be a complete and versatile tool for exploring the capabilities of local LLMs.
+With support for multimodal models, voice-to-text, text-to-speech, and extensive settings, HAL aims to be a complete and versatile tool for exploring the capabilities of local LLMs.
 
 ## ✨ Features
 
@@ -94,7 +94,7 @@ With support for multimodal models, voice-to-text, text-to-speech, and extensive
 
 1.  **Initial Setup**: When you first launch the app, open the **Settings** panel by tapping the gear icon in the app bar.
 
-      * Verify that the **HAL 9000 Base URL** matches your Ollama server address.
+      * Verify that the **HAL Base URL** matches your Ollama server address.
       * Enter the **Model Name** you want to chat with (e.g., `gemma:2b`). This must match a model you have pulled in Ollama.
 
 2.  **Starting a Chat**:

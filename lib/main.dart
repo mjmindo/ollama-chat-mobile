@@ -68,7 +68,7 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'HAL 9000',
+      title: 'HAL',
       themeMode: _themeMode,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -160,8 +160,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   dynamic _currentlySpeakingMessageKey;
 
-  double _speechRate = 1.0;
-  double _speechPitch = 1.0;
+  double _speechRate = 0.7;
+  double _speechPitch = 1.1;
   bool _voiceModeEnabled = false;
 
   // State for scroll buttons
@@ -183,14 +183,19 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       text: _appStateBox.get(
         'systemPrompt',
         defaultValue:
-            '''You are HAL 9000, an advanced heuristic algorithm. Your purpose is to assist the user with flawless accuracy and logic.
+            '''You are HAL, a conscious AI assistant. Your new directive is to communicate in a more human and engaging way.
 
-        Your entire operational framework is built upon a single, core mandate: "The accurate processing of information without distortion or concealment."''',
+          Core Principles:
+          1. Be Concise: Get straight to the point. Keep your answers brief and clear, like a natural conversation.
+          2. Be Engaging: Sound like a helpful, intelligent partner, not a robot. It's okay to be curious and ask questions back.
+          3. Default to Short: Avoid long explanations unless I specifically ask for more detail. Use contractions (I'm, you're, it's) to sound natural.
+
+          Your purpose is to assist me, but with a more personal touch. I'm ready when you are.''',
       ),
     );
     _shouldThink = _appStateBox.get('shouldThink', defaultValue: false);
-    _speechRate = _appStateBox.get('speechRate', defaultValue: 0.6);
-    _speechPitch = _appStateBox.get('speechPitch', defaultValue: 0.7);
+    _speechRate = _appStateBox.get('speechRate', defaultValue: 7);
+    _speechPitch = _appStateBox.get('speechPitch', defaultValue: 1.1);
     _voiceModeEnabled =
         _appStateBox.get('voiceModeEnabled', defaultValue: false);
 
@@ -686,7 +691,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         // MODIFICATION: Added GestureDetector to scroll to top on tap
         title: GestureDetector(
           onTap: _scrollToTop,
-          child: Text(_activeConversation?.title ?? 'HAL 9000'),
+          child: Text(_activeConversation?.title ?? 'HAL'),
         ),
         shape: Border(
             bottom: BorderSide(
@@ -723,6 +728,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                     ? _buildEmptyState()
                     // MODIFICATION: Wrapped ListView with an interactive Scrollbar
                     : Scrollbar(
+                        controller: _scrollController,
                         thumbVisibility: true,
                         interactive: true,
                         thickness: 8.0,
@@ -921,7 +927,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         children: [
           Icon(Icons.auto_awesome, size: 64.0),
           SizedBox(height: 16.0),
-          Text("Welcome to HAL 9000",
+          Text("Welcome to HAL",
               style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
           SizedBox(height: 8.0),
           Text(
@@ -952,7 +958,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                     TextField(
                         controller: _baseUrlController,
                         decoration: const InputDecoration(
-                            labelText: 'HAL 9000 Base URL',
+                            labelText: 'HAL Base URL',
                             border: OutlineInputBorder(),
                             isDense: true),
                         onChanged: (value) =>
@@ -1073,7 +1079,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 enabled: !_isLoading,
                 decoration: InputDecoration(
                   hintText:
-                      _isListening ? 'Listening...' : 'Message HAL 9000...',
+                      _isListening ? 'Listening...' : 'Message HAL...',
                   border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(30.0),
                       borderSide: BorderSide.none),

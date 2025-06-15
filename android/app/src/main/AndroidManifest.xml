@@ -8,7 +8,7 @@
    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
    <application
-        android:label="HAL 9000"
+        android:label="HAL"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
