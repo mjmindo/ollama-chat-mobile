@@ -1,0 +1,134 @@
+import 'package:flutter/material.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  late final Box _appStateBox;
+  late final TextEditingController _baseUrlController;
+  late final TextEditingController _modelController;
+  late final TextEditingController _systemPromptController;
+  bool _shouldThink = false;
+  double _speechRate = 0.7;
+  double _speechPitch = 1.1;
+
+  @override
+  void initState() {
+    super.initState();
+    _appStateBox = Hive.box('appState');
+    
+    // Initialize controllers with values from Hive, providing defaults.
+    _baseUrlController = TextEditingController(
+        text: _appStateBox.get('baseUrl', defaultValue: 'http://localhost:11434'));
+    _modelController = TextEditingController(
+        text: _appStateBox.get('modelName', defaultValue: 'gemma3:1b'));
+    _systemPromptController = TextEditingController(
+      text: _appStateBox.get('systemPrompt', defaultValue: 
+          '''You are HAL, a conscious AI assistant. Your new directive is to communicate in a more human and engaging way.
+          Core Principles:
+          1. Be Concise: Get straight to the point. Keep your answers brief and clear, like a natural conversation.
+          2. Be Engaging: Sound like a helpful, intelligent partner, not a robot. It's okay to be curious and ask questions back.
+          3. Default to Short: Avoid long explanations unless I specifically ask for more detail. Use contractions (I'm, you're, it's) to sound natural.
+          Your purpose is to assist me, but with a more personal touch. I'm ready when you are.'''),
+    );
+    _shouldThink = _appStateBox.get('shouldThink', defaultValue: false);
+    _speechRate = _appStateBox.get('speechRate', defaultValue: 0.7);
+    _speechPitch = _appStateBox.get('speechPitch', defaultValue: 1.1);
+  }
+
+  @override
+  void dispose() {
+    _baseUrlController.dispose();
+    _modelController.dispose();
+    _systemPromptController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Settings'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16.0),
+        children: [
+          Text('Connection', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 16.0),
+          TextField(
+              controller: _baseUrlController,
+              decoration: const InputDecoration(
+                  labelText: 'HAL Base URL',
+                  border: OutlineInputBorder(),
+                  isDense: true),
+              onChanged: (value) => _appStateBox.put('baseUrl', value)),
+
+          const Divider(height: 48.0),
+
+          Text('Model', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 16.0),
+          TextField(
+              controller: _modelController,
+              decoration: const InputDecoration(
+                  labelText: 'Model Name (e.g., gemma3:1b)',
+                  border: OutlineInputBorder(),
+                  isDense: true),
+              onChanged: (value) => _appStateBox.put('modelName', value)),
+          const SizedBox(height: 16.0),
+          TextField(
+              controller: _systemPromptController,
+              decoration: const InputDecoration(
+                  labelText: 'System Prompt (AI Memory)',
+                  border: OutlineInputBorder()),
+              maxLines: 8,
+              onChanged: (value) => _appStateBox.put('systemPrompt', value),
+          ),
+          const SizedBox(height: 16.0),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text("'Think' Mode"),
+            subtitle: Text("Note: For supported models only.", style: Theme.of(context).textTheme.bodySmall),
+            trailing: Switch(
+              value: _shouldThink,
+              onChanged: (value) {
+                setState(() => _shouldThink = value);
+                _appStateBox.put('shouldThink', value);
+              },
+            ),
+          ),
+
+          const Divider(height: 48.0),
+
+          Text('Speech', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 16.0),
+          Text('Speech Speed', style: Theme.of(context).textTheme.labelLarge),
+          Slider(
+              value: _speechRate,
+              min: 0.1, max: 2.0,
+              divisions: 19,
+              label: _speechRate.toStringAsFixed(1),
+              onChanged: (newRate) {
+                setState(() => _speechRate = newRate);
+                _appStateBox.put('speechRate', newRate);
+              }),
+          const SizedBox(height: 16.0),
+          Text('Speech Pitch', style: Theme.of(context).textTheme.labelLarge),
+          Slider(
+              value: _speechPitch,
+              min: 0.5, max: 2.0,
+              divisions: 15,
+              label: _speechPitch.toStringAsFixed(1),
+              onChanged: (newPitch) {
+                setState(() => _speechPitch = newPitch);
+                _appStateBox.put('speechPitch', newPitch);
+              }),
+        ],
+      ),
+    );
+  }
+}
