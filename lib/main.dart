@@ -150,6 +150,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   bool _isListening = false;
   bool _speechEnabled = false;
   bool _isSpeaking = false;
+  
+  // MODIFICATION: Track the key of the message currently being spoken.
+  dynamic _currentlySpeakingMessageKey;
 
   double _speechRate = 1.0;
   double _speechPitch = 1.0;
@@ -187,9 +190,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       _createNewConversation();
     }
     
-    // Register the scroll listener
     _scrollController.addListener(_scrollListener);
-
     _initSpeech();
     _initTts();
 
@@ -271,20 +272,37 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
+  // MODIFICATION: Update TTS handlers to manage speaking state correctly.
   void _initTts() {
     _flutterTts.setStartHandler(() {
       if (mounted) setState(() => _isSpeaking = true);
     });
     _flutterTts.setCompletionHandler(() {
       if (mounted) {
-        setState(() => _isSpeaking = false);
+        setState(() {
+          _isSpeaking = false;
+          _currentlySpeakingMessageKey = null; // Clear the key on completion
+        });
         Future.delayed(const Duration(milliseconds: 100), () {
           if (_voiceModeEnabled && !_isLoading) _startListeningForVoiceMode();
         });
       }
     });
+    _flutterTts.setCancelHandler(() {
+      if (mounted) {
+        setState(() {
+          _isSpeaking = false;
+          _currentlySpeakingMessageKey = null; // Clear the key on cancel/stop
+        });
+      }
+    });
     _flutterTts.setErrorHandler((msg) {
-      if (mounted) setState(() => _isSpeaking = false);
+      if (mounted) {
+        setState(() {
+          _isSpeaking = false;
+          _currentlySpeakingMessageKey = null; // Clear the key on error
+        });
+      }
     });
   }
 
@@ -337,16 +355,28 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     if (mounted) setState(() => _isListening = false);
   }
 
-  Future<void> _speak(String text) async {
+  // MODIFICATION: Accept message key to track which message is speaking.
+  Future<void> _speak(String text, dynamic messageKey) async {
     await _flutterTts.setLanguage("en-US");
     await _flutterTts.setPitch(_speechPitch);
     await _flutterTts.setSpeechRate(_speechRate);
+    if (mounted) {
+      setState(() {
+        _currentlySpeakingMessageKey = messageKey;
+      });
+    }
     await _flutterTts.speak(text);
   }
 
+  // MODIFICATION: Also clear the currently speaking message key on stop.
   Future<void> _stopSpeaking() async {
     await _flutterTts.stop();
-    if (mounted) setState(() => _isSpeaking = false);
+    if (mounted) {
+      setState(() {
+        _isSpeaking = false;
+        _currentlySpeakingMessageKey = null;
+      });
+    }
   }
 
   Future<void> _copyToClipboard(String text) async {
@@ -478,7 +508,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       }
 
       if (_voiceModeEnabled && streamedResponseText.trim().isNotEmpty) {
-        await _speak(streamedResponseText.trim());
+        // MODIFICATION: Pass message key to speak function
+        await _speak(streamedResponseText.trim(), aiMessageKey);
       }
 
     } catch (e) {
@@ -489,7 +520,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           aiMessage.text = finalMessageText;
           await _messageBox.put(aiMessageKey, aiMessage);
         }
-        if (_voiceModeEnabled) await _speak(finalMessageText);
+        // MODIFICATION: Pass message key to speak function
+        if (_voiceModeEnabled) await _speak(finalMessageText, aiMessageKey);
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -555,24 +587,21 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _client?.close();
     _speechToText.cancel();
     _flutterTts.stop();
-    // Clean up the scroll listener
     _scrollController.removeListener(_scrollListener);
     _scrollController.dispose();
     super.dispose();
   }
 
   void _scrollListener() {
-    // Show/hide scroll-to-bottom button
     if (_scrollController.position.pixels < _scrollController.position.maxScrollExtent - 200) {
       if (!_showScrollDownButton) setState(() => _showScrollDownButton = true);
     } else {
       if (_showScrollDownButton) setState(() => _showScrollDownButton = false);
     }
-    // Show/hide scroll-to-top button
     if (_scrollController.position.pixels > 200) {
       if (!_showScrollUpButton) setState(() => _showScrollUpButton = true);
     } else {
-      if (_showScrollUpButton) setState(() => _showScrollUpButton = false);
+      if (!_showScrollUpButton) setState(() => _showScrollUpButton = false);
     }
   }
 
@@ -638,16 +667,22 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                     ? _buildEmptyState()
                     : ListView.builder(
                         controller: _scrollController,
-                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 72), // Add padding to bottom
+                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 72),
                         itemCount: currentMessages.length,
                         itemBuilder: (context, index) {
                           final message = currentMessages[index];
+                          final isCurrentlySpeaking = message.key == _currentlySpeakingMessageKey;
+                          
                           if (index == currentMessages.length - 1 && _isLoading && message.text.isEmpty && !message.isUser) {
                             return const TypingIndicator();
                           }
+                          // MODIFICATION: Pass speaking state and stop callback to ChatBubble.
                           return ChatBubble(
                             message: message,
+                            messageKey: message.key,
+                            isCurrentlySpeaking: isCurrentlySpeaking,
                             onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
+                            onStop: _stopSpeaking,
                             onCopy: message.isUser ? null : _copyToClipboard,
                           );
                         },
@@ -921,15 +956,29 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
 class ChatBubble extends StatelessWidget {
   final ChatMessage message;
-  final void Function(String text)? onSpeak;
+  // MODIFICATION: Add new parameters
+  final dynamic messageKey;
+  final bool isCurrentlySpeaking;
+  final void Function(String text, dynamic messageKey)? onSpeak;
+  final VoidCallback? onStop;
   final void Function(String text)? onCopy;
 
-  const ChatBubble({required this.message, this.onSpeak, this.onCopy, super.key});
+  const ChatBubble({
+    required this.message,
+    this.messageKey,
+    this.isCurrentlySpeaking = false,
+    this.onSpeak,
+    this.onStop,
+    this.onCopy,
+    super.key
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isUser = message.isUser;
+    // MODIFICATION: Determine if the speak/stop controls should be shown at all.
+    final bool canControlSpeech = !isUser && message.text.isNotEmpty && (onSpeak != null || onStop != null);
 
     final markdownStyle = MarkdownStyleSheet.fromTheme(theme).copyWith(
       p: theme.textTheme.bodyLarge,
@@ -960,15 +1009,41 @@ class ChatBubble extends StatelessWidget {
                           child: ClipRRect(borderRadius: BorderRadius.circular(8.0), child: Image.file(File(message.imagePath!), height: 150, fit: BoxFit.cover)),
                         ),
                       MarkdownBody(data: message.text, styleSheet: markdownStyle, selectable: true),
-                      if (!isUser && message.text.isNotEmpty && (onSpeak != null || onCopy != null))
+                      // MODIFICATION: Logic to show speak/stop/copy buttons.
+                      if (!isUser && message.text.isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 8.0),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              if (onSpeak != null) IconButton(icon: const Icon(Icons.volume_up_outlined), iconSize: 20, visualDensity: VisualDensity.compact, tooltip: 'Read aloud', onPressed: () => onSpeak!(message.text)),
-                              if (onCopy != null) IconButton(icon: const Icon(Icons.copy_outlined), iconSize: 20, visualDensity: VisualDensity.compact, tooltip: 'Copy text', onPressed: () => onCopy!(message.text)),
+                              // Logic to show either Speak or Stop button
+                              if (canControlSpeech)
+                                if (isCurrentlySpeaking)
+                                  IconButton(
+                                    icon: const Icon(Icons.stop_circle_outlined),
+                                    color: theme.colorScheme.primary,
+                                    iconSize: 20,
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: 'Stop reading',
+                                    onPressed: onStop,
+                                  )
+                                else
+                                  IconButton(
+                                    icon: const Icon(Icons.volume_up_outlined),
+                                    iconSize: 20,
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: 'Read aloud',
+                                    onPressed: () => onSpeak!(message.text, messageKey),
+                                  ),
+                              if (onCopy != null)
+                                IconButton(
+                                  icon: const Icon(Icons.copy_outlined),
+                                  iconSize: 20,
+                                  visualDensity: VisualDensity.compact,
+                                  tooltip: 'Copy text',
+                                  onPressed: () => onCopy!(message.text),
+                                ),
                             ],
                           ),
                         )
