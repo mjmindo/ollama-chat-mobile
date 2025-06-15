@@ -112,9 +112,14 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   final FlutterTts _flutterTts = FlutterTts();
   bool _isListening = false;
   bool _speechEnabled = false;
+  // State for speaking status
+  bool _isSpeaking = false; 
 
   double _speechRate = 1.0;
   double _speechPitch = 1.0;
+
+  // Voice mode state
+  bool _voiceModeEnabled = false;
 
 
   @override
@@ -141,36 +146,154 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
     _speechRate = _appStateBox.get('speechRate') ?? 1.0;
     _speechPitch = _appStateBox.get('speechPitch') ?? 1.0;
+
+    // Load voice mode state
+    _voiceModeEnabled = _appStateBox.get('voiceModeEnabled') ?? false;
     
     _initSpeech();
+    _initTts(); // Initialize TTS handlers
+
+    // Automatically start listening if voice mode is enabled on startup
+    if (_voiceModeEnabled) {
+      _startListeningForVoiceMode();
+    }
+  }
+
+  // Initialize TTS handlers for _isSpeaking state
+  void _initTts() {
+    _flutterTts.setStartHandler(() {
+      print("TTS: Start Speaking"); // Debug print
+      if (mounted) {
+        setState(() {
+          _isSpeaking = true;
+        });
+      }
+    });
+
+    _flutterTts.setCompletionHandler(() {
+      print("TTS: Speaking Completed"); // Debug print
+      if (mounted) {
+        setState(() {
+          _isSpeaking = false;
+        });
+        // After speaking, if in voice mode, start listening again
+        // Added a small delay to give TTS engine a moment
+        Future.delayed(const Duration(milliseconds: 100), () {
+          if (_voiceModeEnabled && !_isLoading) {
+            _startListeningForVoiceMode();
+          }
+        });
+      }
+    });
+
+    _flutterTts.setErrorHandler((msg) {
+      print("TTS Error: $msg"); // Debug print
+      if (mounted) {
+        setState(() {
+          _isSpeaking = false;
+        });
+      }
+    });
   }
   
   void _initSpeech() async {
     try {
-       _speechEnabled = await _speechToText.initialize();
+       _speechEnabled = await _speechToText.initialize(
+         onStatus: (status) {
+           print("STT Status: $status"); // Debug print
+           // Handle speech recognition status changes for voice mode
+           if (_voiceModeEnabled) {
+             if (status == SpeechToText.listeningStatus && !_isListening) {
+               setState(() { _isListening = true; });
+             } else if (status == SpeechToText.notListeningStatus && _isListening && !_isLoading && !_isSpeaking) {
+               // If it stops listening and we are in voice mode and not loading/speaking, try to restart
+               // Add a small delay to prevent immediate re-listening if user pauses for thought
+               Future.delayed(const Duration(milliseconds: 500), () {
+                 if (_voiceModeEnabled && !_isLoading && !_isSpeaking) { // Re-check state
+                   print("STT: Attempting to restart listening from onStatus"); // Debug print
+                   _startListeningForVoiceMode();
+                 }
+               });
+             }
+           }
+         }
+       );
+       print("STT Initialized: $_speechEnabled"); // Debug print
     } catch (e) {
-      print('Speech recognition failed to initialize: $e');
+      print('Speech recognition failed to initialize: $e'); // Debug print
     }
     if (mounted) {
       setState(() {});
     }
   }
 
-  Future<void> _startListening() async {
-    await _stopSpeaking();
-    await _speechToText.listen(
-      onResult: (result) {
+  // Separate function for starting listening specifically for voice mode
+  Future<void> _startListeningForVoiceMode() async {
+    print("STT: _startListeningForVoiceMode called. isListening: $_isListening, isLoading: $_isLoading, isSpeaking: $_isSpeaking"); // Debug print
+    if (_speechEnabled && !_isLoading && !_isSpeaking) { // Removed check for !_isListening here
+      // Explicitly stop any ongoing listening session first
+      if (_isListening) { // Only call stop if we think it's listening to avoid unnecessary operations
+        print("STT: Forcing stop listening before starting new session."); // Debug print
+        await _speechToText.stop();
+        if (mounted) {
+          setState(() {
+            _isListening = false; // Ensure our state is false after stopping
+          });
+        }
+      }
+
+      // Clear controller to prevent old text from triggering send
+      if (_controller.text.isNotEmpty) {
+        _controller.clear();
+      }
+      
+      print("STT: Starting listen..."); // Debug print
+      await _speechToText.listen(
+        onResult: (result) {
+          setState(() {
+            _controller.text = result.recognizedWords;
+          });
+          // If in voice mode and a final result is obtained, send message automatically
+          if (result.finalResult && _voiceModeEnabled) {
+            print("STT: Final result obtained: ${result.recognizedWords}. Sending message."); // Debug print
+            _sendMessage(_controller.text);
+          }
+        },
+        listenFor: const Duration(minutes: 5), // Listen for a longer period in voice mode
+        pauseFor: const Duration(seconds: 3), // Pause before stopping if no speech
+        partialResults: false, // Only send final results to controller to avoid flickering
+      );
+      if (mounted) {
         setState(() {
-          _controller.text = result.recognizedWords;
+          _isListening = true;
         });
-      },
-    );
-    setState(() {
-      _isListening = true;
-    });
+      }
+    } else {
+      print("STT: Not starting listen due to conditions (speechEnabled: $_speechEnabled, isLoading: $_isLoading, isSpeaking: $_isSpeaking)."); // Debug print
+    }
+  }
+  // Original start listening (now for manual use)
+  Future<void> _startListeningManual() async {
+    if (_speechEnabled && !_isListening) {
+      await _stopSpeaking();
+      await _speechToText.listen(
+        onResult: (result) {
+          setState(() {
+            _controller.text = result.recognizedWords;
+          });
+        },
+        listenFor: const Duration(seconds: 5), // Shorter duration for manual input
+      );
+      if (mounted) {
+        setState(() {
+          _isListening = true;
+        });
+      }
+    }
   }
 
   Future<void> _stopListening() async {
+    print("STT: Stopping listen."); // Debug print
     await _speechToText.stop();
     if (mounted) {
       setState(() {
@@ -184,19 +307,28 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     await _flutterTts.setPitch(_speechPitch);
     await _flutterTts.setSpeechRate(_speechRate);
     await _flutterTts.speak(text);
+    // No need to call _startListeningForVoiceMode here, it's handled by setCompletionHandler
   }
 
+  // Corrected _stopSpeaking: simpler, safer, and removes the non-existent getter.
   Future<void> _stopSpeaking() async {
+    print("TTS: _stopSpeaking called."); // Debug print
     await _flutterTts.stop();
+    if (mounted) {
+      setState(() {
+        _isSpeaking = false;
+      });
+    }
   }
 
   Future<void> _copyToClipboard(String text) async {
     await Clipboard.setData(ClipboardData(text: text));
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Copied to clipboard'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: const Text('Copied to clipboard'),
+          duration: const Duration(seconds: 2), // Shortened duration
+          behavior: SnackBarBehavior.floating, // Make it floating
         ),
       );
     }
@@ -220,9 +352,20 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
 
   Future<void> _sendMessage(String text) async {
-    if (text.trim().isEmpty && _selectedImage == null) return;
+    print("SendMessage called with: '$text'"); // Debug print
+    if (text.trim().isEmpty && _selectedImage == null) {
+      // If voice mode is on, and nothing was recognized, try listening again
+      if (_voiceModeEnabled && !_isLoading && !_isSpeaking) {
+        print("SendMessage: Empty or no image, restarting listen."); // Debug print
+        _startListeningForVoiceMode();
+      }
+      return;
+    }
     
     _isManuallyStopped = false;
+    await _stopListening(); // Stop listening before sending message
+    await _stopSpeaking(); // Stop speaking before sending message
+
     final userMessage = ChatMessage(text: text, isUser: true);
     setState(() {
       _messages.add(userMessage);
@@ -304,7 +447,14 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       final finalMessage = ChatMessage(text: finalMessageText, isUser: false);
       await _chatBox.put(aiMessageKey, finalMessage);
 
+      // Speak the AI's response if voice mode is enabled
+      if (_voiceModeEnabled && finalMessageText.isNotEmpty) {
+        print("AI Response: '$finalMessageText'. Speaking..."); // Debug print
+        await _speak(finalMessageText);
+      }
+
     } catch (e) {
+      print("SendMessage Error: $e"); // Debug print
       if (mounted) {
         final finalMessage = _isManuallyStopped
             ? ChatMessage(text: "[Generation stopped by user]", isUser: false)
@@ -313,6 +463,10 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           _messages[_messages.length - 1] = finalMessage;
         });
         await _chatBox.put(aiMessageKey, finalMessage);
+        // If voice mode is enabled and there's an error, speak it
+        if (_voiceModeEnabled) {
+          await _speak(finalMessage.text);
+        }
       }
     } finally {
       if (mounted) {
@@ -323,17 +477,30 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       _client?.close();
       _client = null;
       _scrollToBottom();
+      // If voice mode is enabled, start listening again after message processing
+      // This is now handled by _initTts.setCompletionHandler if speaking occurred.
+      // If no speaking (e.g., just an error), we need to ensure listening restarts.
+      if (_voiceModeEnabled && mounted && !_isSpeaking) {
+        print("SendMessage Finally: Restarting listen directly (AI not speaking)."); // Debug print
+        _startListeningForVoiceMode();
+      }
     }
   }
 
   void _stopGeneration() {
+    print("Stop Generation called."); // Debug print
     if (_isLoading) {
       setState(() {
         _isManuallyStopped = true;
       });
       _client?.close();
     }
-    _stopSpeaking();
+    _stopSpeaking(); // Ensures _isSpeaking is false
+    _stopListening(); // Ensures _isListening is false
+    // If voice mode is enabled, start listening again after stopping generation
+    if (_voiceModeEnabled && mounted) {
+      _startListeningForVoiceMode();
+    }
   }
 
   Future<void> _clearConversation() async {
@@ -356,11 +523,19 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         _messages.clear();
         _conversationContext = null;
       });
+      // Stop listening and speaking when clearing conversation
+      await _stopListening();
+      await _stopSpeaking();
+      // If voice mode is enabled, start listening again after clearing conversation
+      if (_voiceModeEnabled) {
+        _startListeningForVoiceMode();
+      }
     }
   }
 
   @override
   void dispose() {
+    print("Dispose called."); // Debug print
     _controller.dispose();
     _scrollController.dispose();
     _baseUrlController.dispose();
@@ -385,6 +560,38 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       }
     });
   }
+
+  // Function to toggle voice mode
+  void _toggleVoiceMode() async {
+    setState(() {
+      _voiceModeEnabled = !_voiceModeEnabled;
+    });
+    await _appStateBox.put('voiceModeEnabled', _voiceModeEnabled); // Persist state
+
+    if (_voiceModeEnabled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Voice Mode ON. Speak to chat.'),
+          duration: const Duration(seconds: 2), // Shortened duration
+          behavior: SnackBarBehavior.floating, // Make it floating
+        ),
+      );
+      // Start listening automatically when voice mode is enabled
+      _startListeningForVoiceMode();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Voice Mode OFF.'),
+          duration: const Duration(seconds: 2), // Shortened duration
+          behavior: SnackBarBehavior.floating, // Make it floating
+        ),
+      );
+      // Stop listening when voice mode is disabled
+      await _stopListening();
+      await _stopSpeaking(); // Ensure speaking stops too
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -415,61 +622,81 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Settings', onPressed: () => _showSettingsDialog(context)),
         ],
       ),
-      body: Column(
+      // Use Stack to overlay the Voice Mode Feedback
+      body: Stack(
         children: [
-          Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.all(8.0),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final message = _messages[index];
-                return ChatBubble(
-                  message: message,
-                  onSpeak: message.isUser ? null : _speak,
-                  onCopy: message.isUser ? null : _copyToClipboard,
-                );
-              },
-            ),
-          ),
-          if (_selectedImage != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-              child: Stack(
-                children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Theme.of(context).colorScheme.outline),
-                      borderRadius: BorderRadius.circular(8.0),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8.0),
-                      child: Image.file(
-                        _selectedImage!,
-                        height: 100,
-                        width: 100,
-                        fit: BoxFit.cover,
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    top: 4,
-                    right: 4,
-                    child: InkWell(
-                      onTap: _clearImage,
-                      child: Container(
+          Column(
+            children: [
+              Expanded(
+                child: ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.all(8.0),
+                  itemCount: _messages.length,
+                  itemBuilder: (context, index) {
+                    final message = _messages[index];
+                    return ChatBubble(
+                      message: message,
+                      // Speak only if voice mode is OFF (manual control)
+                      onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
+                      onCopy: message.isUser ? null : _copyToClipboard,
+                    );
+                  },
+                ),
+              ),
+              if (_selectedImage != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                  child: Stack(
+                    children: [
+                      Container(
                         decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.5),
-                          shape: BoxShape.circle,
+                          border: Border.all(color: Theme.of(context).colorScheme.outline),
+                          borderRadius: BorderRadius.circular(8.0),
                         ),
-                        child: const Icon(Icons.close, color: Colors.white, size: 18),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8.0),
+                          child: Image.file(
+                            _selectedImage!,
+                            height: 100,
+                            width: 100,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
                       ),
-                    ),
-                  )
-                ],
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: InkWell(
+                          onTap: _clearImage,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.5),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.close, color: Colors.white, size: 18),
+                          ),
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              _buildInputArea(context),
+            ],
+          ),
+          // Voice Mode Feedback Overlay - MOVED TO TOP
+          if (_voiceModeEnabled)
+            Positioned(
+              // Adjusted top position
+              top: 8.0 + MediaQuery.of(context).padding.top, // Padding from top + safe area
+              left: 0,
+              right: 0,
+              child: VoiceModeFeedbackOverlay(
+                isListening: _isListening,
+                isSpeaking: _isSpeaking,
+                isLoading: _isLoading,
+                onExitVoiceMode: _toggleVoiceMode,
               ),
             ),
-          _buildInputArea(context),
         ],
       ),
     );
@@ -570,16 +797,32 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               onPressed: _pickImage,
               tooltip: 'Attach Image',
             ),
+            // Voice Mode Toggle Button with dynamic icons based on state
             IconButton(
-              icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
-              color: _isListening ? Theme.of(context).colorScheme.primary : null,
-              onPressed: !_speechEnabled ? null : (_isListening ? _stopListening : _startListening),
-              tooltip: _isListening ? 'Stop listening' : 'Listen',
+              icon: Icon(
+                _voiceModeEnabled
+                    ? (_isListening ? Icons.mic : Icons.record_voice_over) // If voice mode, show mic if listening, else record_voice_over
+                    : Icons.mic_none, // If not in voice mode, show mic_none (toggle to voice mode)
+              ),
+              color: _voiceModeEnabled
+                  ? (_isListening ? Theme.of(context).colorScheme.primary : null) // If voice mode, color primary if listening
+                  : null, // No specific color if not in voice mode
+              onPressed: _speechEnabled ? _toggleVoiceMode : null,
+              tooltip: _voiceModeEnabled ? 'Exit Voice Mode' : 'Enter Voice Mode',
             ),
+            // Conditional microphone button for manual speech input
+            if (!_voiceModeEnabled) // Only show microphone for manual input when voice mode is off
+              IconButton(
+                icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
+                color: _isListening ? Theme.of(context).colorScheme.primary : null,
+                onPressed: !_speechEnabled ? null : (_isListening ? _stopListening : _startListeningManual),
+                tooltip: _isListening ? 'Stop listening' : 'Listen',
+              ),
             Expanded(
               child: TextField(
                 controller: _controller,
-                onSubmitted: _isLoading ? null : _sendMessage,
+                // Disable onSubmitted if in voice mode or loading
+                onSubmitted: (_voiceModeEnabled || _isLoading) ? null : (text) => _sendMessage(text),
                 enabled: !_isLoading,
                 decoration: InputDecoration(
                   hintText: 'Message Ollama...',
@@ -601,7 +844,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   foregroundColor: WidgetStateProperty.all(Theme.of(context).colorScheme.onError),
                 ),
               )
-            else
+            // Hide send button if in voice mode
+            else if (!_voiceModeEnabled)
               IconButton.filled(
                 icon: const Icon(Icons.send_rounded),
                 onPressed: () => _sendMessage(_controller.text),
@@ -667,7 +911,8 @@ class ChatBubble extends StatelessWidget {
               ),
           ],
         ),
-        if (!isUser && message.text.isNotEmpty)
+        // Only show speak/copy buttons if onSpeak or onCopy are provided (i.e., not in full voice mode)
+        if (!isUser && message.text.isNotEmpty && (onSpeak != null || onCopy != null))
           Padding(
             padding: const EdgeInsets.only(left: 48.0, right: 48.0),
             child: Row(
@@ -691,6 +936,89 @@ class ChatBubble extends StatelessWidget {
             ),
           )
       ],
+    );
+  }
+}
+
+// Floating Modal Widget for Voice Mode Feedback
+class VoiceModeFeedbackOverlay extends StatelessWidget {
+  final bool isListening;
+  final bool isSpeaking;
+  final bool isLoading;
+  final VoidCallback onExitVoiceMode;
+
+  const VoiceModeFeedbackOverlay({
+    super.key,
+    required this.isListening,
+    required this.isSpeaking,
+    required this.isLoading,
+    required this.onExitVoiceMode,
+  });
+
+  String get _statusText {
+    if (isLoading) {
+      return "Processing...";
+    } else if (isSpeaking) {
+      return "Speaking...";
+    } else if (isListening) {
+      return "Listening...";
+    }
+    return "Voice Mode Active"; // Default when not actively doing anything
+  }
+
+  IconData get _statusIcon {
+    if (isLoading) {
+      return Icons.hourglass_empty;
+    } else if (isSpeaking) {
+      return Icons.volume_up;
+    } else if (isListening) {
+      return Icons.mic;
+    }
+    return Icons.record_voice_over;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding( // Added padding for horizontal spacing
+      padding: const EdgeInsets.symmetric(horizontal: 20.0),
+      child: Card(
+        // Removed Center widget here, padding takes care of horizontal margin
+        color: theme.colorScheme.primaryContainer,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20.0)),
+        elevation: 8.0,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Row(
+            mainAxisSize: MainAxisSize.max, // Make the row take full width available
+            mainAxisAlignment: MainAxisAlignment.spaceBetween, // Distribute space
+            children: [
+              Icon(
+                _statusIcon,
+                color: theme.colorScheme.onPrimaryContainer,
+                size: 30,
+              ),
+              const SizedBox(width: 12.0),
+              Expanded( // Allow text to take remaining space
+                child: Text(
+                  _statusText,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: theme.colorScheme.onPrimaryContainer,
+                  ),
+                  overflow: TextOverflow.ellipsis, // Handle long text
+                ),
+              ),
+              // const SizedBox(width: 20.0), // Removed as spaceBetween handles it
+              IconButton(
+                icon: const Icon(Icons.close),
+                color: theme.colorScheme.onPrimaryContainer,
+                onPressed: onExitVoiceMode,
+                tooltip: 'Exit Voice Mode',
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
