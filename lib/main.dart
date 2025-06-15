@@ -597,8 +597,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 tooltip: 'Stop Generation',
                 iconSize: 28,
                 style: ButtonStyle(
-                  backgroundColor: MaterialStateProperty.all(Theme.of(context).colorScheme.error),
-                  foregroundColor: MaterialStateProperty.all(Theme.of(context).colorScheme.onError),
+                  backgroundColor: WidgetStateProperty.all(Theme.of(context).colorScheme.error),
+                  foregroundColor: WidgetStateProperty.all(Theme.of(context).colorScheme.onError),
                 ),
               )
             else
