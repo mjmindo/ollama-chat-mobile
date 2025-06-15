@@ -17,7 +17,7 @@ Future<void> main() async {
   await Hive.initFlutter();
   Hive.registerAdapter(ChatMessageAdapter());
   await Hive.openBox<ChatMessage>('chatHistory');
-  await Hive.openBox('appState');
+  await Hive.openBox('appState'); // For settings
 
   runApp(const MyApp());
 }
@@ -35,35 +35,50 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  // THEME TOGGLE: Add state variable for the theme mode.
   ThemeMode _themeMode = ThemeMode.system;
 
-  // THEME TOGGLE: Method for child widgets to call to change the theme.
+  @override
+  void initState() {
+    super.initState();
+    // Load the saved theme mode
+    final appStateBox = Hive.box('appState');
+    final theme = appStateBox.get('themeMode');
+    if (theme == 'light') {
+      _themeMode = ThemeMode.light;
+    } else if (theme == 'dark') {
+      _themeMode = ThemeMode.dark;
+    } else {
+      _themeMode = ThemeMode.system;
+    }
+  }
+
   void changeTheme(ThemeMode themeMode) {
     setState(() {
       _themeMode = themeMode;
     });
+    // Save the theme mode
+    final appStateBox = Hive.box('appState');
+    appStateBox.put('themeMode', themeMode.name);
   }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Cortex',
-      // THEME TOGGLE: Use the state variable to set the theme mode.
+      title: 'HAL 9000',
       themeMode: _themeMode,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          // Change the seed color to blue for the light theme.
-          seedColor: Colors.blue,
+          // CHANGED: Using a different color for a more modern feel
+          seedColor: Colors.deepPurple,
           brightness: Brightness.light,
         ),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          // Change the seed color to blue for the dark theme.
-          seedColor: Colors.blue,
+          // CHANGED: Using a different color for a more modern feel
+          seedColor: Colors.deepPurple,
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
@@ -73,13 +88,17 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
+
 @HiveType(typeId: 0)
 class ChatMessage {
   @HiveField(0)
   final String text;
   @HiveField(1)
   final bool isUser;
-  ChatMessage({required this.text, required this.isUser});
+  @HiveField(2)
+  final String? imagePath;
+
+  ChatMessage({required this.text, required this.isUser, this.imagePath});
 }
 
 class OllamaChatPage extends StatefulWidget {
@@ -107,77 +126,56 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   late Box<ChatMessage> _chatBox;
   late Box _appStateBox;
   List<int>? _conversationContext;
-  
+
   final SpeechToText _speechToText = SpeechToText();
   final FlutterTts _flutterTts = FlutterTts();
   bool _isListening = false;
   bool _speechEnabled = false;
-  // State for speaking status
-  bool _isSpeaking = false; 
+  bool _isSpeaking = false;
 
   double _speechRate = 1.0;
   double _speechPitch = 1.0;
-
-  // Voice mode state
   bool _voiceModeEnabled = false;
 
 
   @override
   void initState() {
     super.initState();
-    _baseUrlController = TextEditingController(text: 'http://localhost:11434');
-    _modelController = TextEditingController(text: 'gemma3:1B');
-    _systemPromptController = TextEditingController();
-    _suffixController = TextEditingController();
-
-
     _chatBox = Hive.box<ChatMessage>('chatHistory');
     _appStateBox = Hive.box('appState');
-    
+
+    // --- PERSISTENCE: Load all settings from Hive ---
+    _baseUrlController = TextEditingController(text: _appStateBox.get('baseUrl', defaultValue: 'http://localhost:11434'));
+    _modelController = TextEditingController(text: _appStateBox.get('modelName', defaultValue: 'gemma3:1B'));
+    _systemPromptController = TextEditingController(text: _appStateBox.get('systemPrompt', defaultValue: ''));
+    _suffixController = TextEditingController(text: _appStateBox.get('suffix', defaultValue: ''));
+    _shouldThink = _appStateBox.get('shouldThink', defaultValue: false);
+    _speechRate = _appStateBox.get('speechRate', defaultValue: 1.0);
+    _speechPitch = _appStateBox.get('speechPitch', defaultValue: 1.0);
+    _voiceModeEnabled = _appStateBox.get('voiceModeEnabled', defaultValue: false);
+
     _messages = _chatBox.values.toList();
     _conversationContext = _appStateBox.get('lastContext')?.cast<int>();
-    
-    final storedSystemPrompt = _appStateBox.get('systemPrompt');
-    _systemPromptController.text = storedSystemPrompt ?? '';
 
-    _systemPromptController.addListener(() {
-      _appStateBox.put('systemPrompt', _systemPromptController.text);
-    });
+    // Add listeners to save settings on change
+    _systemPromptController.addListener(() => _appStateBox.put('systemPrompt', _systemPromptController.text));
 
-    _speechRate = _appStateBox.get('speechRate') ?? 1.0;
-    _speechPitch = _appStateBox.get('speechPitch') ?? 1.0;
-
-    // Load voice mode state
-    _voiceModeEnabled = _appStateBox.get('voiceModeEnabled') ?? false;
-    
     _initSpeech();
-    _initTts(); // Initialize TTS handlers
+    _initTts();
 
-    // Automatically start listening if voice mode is enabled on startup
     if (_voiceModeEnabled) {
       _startListeningForVoiceMode();
     }
   }
 
-  // Initialize TTS handlers for _isSpeaking state
   void _initTts() {
     _flutterTts.setStartHandler(() {
-      print("TTS: Start Speaking"); // Debug print
-      if (mounted) {
-        setState(() {
-          _isSpeaking = true;
-        });
-      }
+      if (mounted) setState(() => _isSpeaking = true);
     });
 
     _flutterTts.setCompletionHandler(() {
-      print("TTS: Speaking Completed"); // Debug print
       if (mounted) {
-        setState(() {
-          _isSpeaking = false;
-        });
-        // After speaking, if in voice mode, start listening again
-        // Added a small delay to give TTS engine a moment
+        setState(() => _isSpeaking = false);
         Future.delayed(const Duration(milliseconds: 100), () {
           if (_voiceModeEnabled && !_isLoading) {
             _startListeningForVoiceMode();
@@ -187,119 +185,61 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     });
 
     _flutterTts.setErrorHandler((msg) {
-      print("TTS Error: $msg"); // Debug print
-      if (mounted) {
-        setState(() {
-          _isSpeaking = false;
-        });
-      }
+      if (mounted) setState(() => _isSpeaking = false);
     });
   }
-  
+
   void _initSpeech() async {
     try {
        _speechEnabled = await _speechToText.initialize(
          onStatus: (status) {
-           print("STT Status: $status"); // Debug print
-           // Handle speech recognition status changes for voice mode
            if (_voiceModeEnabled) {
-             if (status == SpeechToText.listeningStatus && !_isListening) {
-               setState(() { _isListening = true; });
-             } else if (status == SpeechToText.notListeningStatus && _isListening && !_isLoading && !_isSpeaking) {
-               // If it stops listening and we are in voice mode and not loading/speaking, try to restart
-               // Add a small delay to prevent immediate re-listening if user pauses for thought
-               Future.delayed(const Duration(milliseconds: 500), () {
-                 if (_voiceModeEnabled && !_isLoading && !_isSpeaking) { // Re-check state
-                   print("STT: Attempting to restart listening from onStatus"); // Debug print
-                   _startListeningForVoiceMode();
-                 }
-               });
+             bool isCurrentlyListening = status == SpeechToText.listeningStatus;
+             if (isCurrentlyListening != _isListening) {
+               setState(() => _isListening = isCurrentlyListening);
              }
            }
          }
        );
-       print("STT Initialized: $_speechEnabled"); // Debug print
     } catch (e) {
-      print('Speech recognition failed to initialize: $e'); // Debug print
+      debugPrint('Speech recognition failed to initialize: $e');
     }
-    if (mounted) {
-      setState(() {});
-    }
+    if (mounted) setState(() {});
   }
 
-  // Separate function for starting listening specifically for voice mode
   Future<void> _startListeningForVoiceMode() async {
-    print("STT: _startListeningForVoiceMode called. isListening: $_isListening, isLoading: $_isLoading, isSpeaking: $_isSpeaking"); // Debug print
-    if (_speechEnabled && !_isLoading && !_isSpeaking) { // Removed check for !_isListening here
-      // Explicitly stop any ongoing listening session first
-      if (_isListening) { // Only call stop if we think it's listening to avoid unnecessary operations
-        print("STT: Forcing stop listening before starting new session."); // Debug print
-        await _speechToText.stop();
-        if (mounted) {
-          setState(() {
-            _isListening = false; // Ensure our state is false after stopping
-          });
-        }
-      }
+    if (!_speechEnabled || _isLoading || _isSpeaking || _isListening) return;
 
-      // Clear controller to prevent old text from triggering send
-      if (_controller.text.isNotEmpty) {
-        _controller.clear();
-      }
-      
-      print("STT: Starting listen..."); // Debug print
-      await _speechToText.listen(
-        onResult: (result) {
-          setState(() {
-            _controller.text = result.recognizedWords;
-          });
-          // If in voice mode and a final result is obtained, send message automatically
-          if (result.finalResult && _voiceModeEnabled) {
-            print("STT: Final result obtained: ${result.recognizedWords}. Sending message."); // Debug print
-            _sendMessage(_controller.text);
-          }
-        },
-        listenFor: const Duration(minutes: 5), // Listen for a longer period in voice mode
-        pauseFor: const Duration(seconds: 3), // Pause before stopping if no speech
-        partialResults: false, // Only send final results to controller to avoid flickering
-      );
-      if (mounted) {
-        setState(() {
-          _isListening = true;
-        });
-      }
-    } else {
-      print("STT: Not starting listen due to conditions (speechEnabled: $_speechEnabled, isLoading: $_isLoading, isSpeaking: $_isSpeaking)."); // Debug print
-    }
+    _controller.clear();
+
+    await _speechToText.listen(
+      onResult: (result) {
+        _controller.text = result.recognizedWords;
+        if (result.finalResult && _voiceModeEnabled) {
+          _sendMessage(_controller.text);
+        }
+      },
+      listenFor: const Duration(minutes: 5),
+      pauseFor: const Duration(seconds: 3),
+      partialResults: true, // Set to true for more responsive feedback in controller
+    );
+    if(mounted) setState(() => _isListening = true);
   }
-  // Original start listening (now for manual use)
+
   Future<void> _startListeningManual() async {
     if (_speechEnabled && !_isListening) {
       await _stopSpeaking();
       await _speechToText.listen(
-        onResult: (result) {
-          setState(() {
-            _controller.text = result.recognizedWords;
-          });
-        },
-        listenFor: const Duration(seconds: 5), // Shorter duration for manual input
+        onResult: (result) => setState(() => _controller.text = result.recognizedWords),
       );
-      if (mounted) {
-        setState(() {
-          _isListening = true;
-        });
-      }
+      if (mounted) setState(() => _isListening = true);
     }
   }
 
   Future<void> _stopListening() async {
-    print("STT: Stopping listen."); // Debug print
+    if(!_isListening) return;
     await _speechToText.stop();
-    if (mounted) {
-      setState(() {
-        _isListening = false;
-      });
-    }
+    if (mounted) setState(() => _isListening = false);
   }
 
   Future<void> _speak(String text) async {
@@ -307,18 +247,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     await _flutterTts.setPitch(_speechPitch);
     await _flutterTts.setSpeechRate(_speechRate);
     await _flutterTts.speak(text);
-    // No need to call _startListeningForVoiceMode here, it's handled by setCompletionHandler
   }
 
-  // Corrected _stopSpeaking: simpler, safer, and removes the non-existent getter.
   Future<void> _stopSpeaking() async {
-    print("TTS: _stopSpeaking called."); // Debug print
     await _flutterTts.stop();
-    if (mounted) {
-      setState(() {
-        _isSpeaking = false;
-      });
-    }
+    if (mounted) setState(() => _isSpeaking = false);
   }
 
   Future<void> _copyToClipboard(String text) async {
@@ -327,12 +260,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: const Text('Copied to clipboard'),
-          duration: const Duration(seconds: 2), // Shortened duration
-          behavior: SnackBarBehavior.floating, // Make it floating
-          // NEW: To make it higher, we set a vertical offset.
-          // This only works if behavior is floating and context allows it.
-          // Default bottom position is usually around 0. You can increase this.
-          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150), // Example: ~150px from top
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150, left: 20, right: 20),
         ),
       );
     }
@@ -342,35 +272,26 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
     if (image != null) {
-      setState(() {
-        _selectedImage = File(image.path);
-      });
+      setState(() => _selectedImage = File(image.path));
     }
   }
 
-  void _clearImage() {
-    setState(() {
-      _selectedImage = null;
-    });
-  }
+  void _clearImage() => setState(() => _selectedImage = null);
 
 
   Future<void> _sendMessage(String text) async {
-    print("SendMessage called with: '$text'"); // Debug print
     if (text.trim().isEmpty && _selectedImage == null) {
-      // If voice mode is on, and nothing was recognized, try listening again
       if (_voiceModeEnabled && !_isLoading && !_isSpeaking) {
-        print("SendMessage: Empty or no image, restarting listen."); // Debug print
         _startListeningForVoiceMode();
       }
       return;
     }
-    
-    _isManuallyStopped = false;
-    await _stopListening(); // Stop listening before sending message
-    await _stopSpeaking(); // Stop speaking before sending message
 
-    final userMessage = ChatMessage(text: text, isUser: true);
+    _isManuallyStopped = false;
+    await _stopListening();
+    await _stopSpeaking();
+
+    final userMessage = ChatMessage(text: text, isUser: true, imagePath: _selectedImage?.path);
     setState(() {
       _messages.add(userMessage);
       _isLoading = true;
@@ -379,12 +300,15 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _scrollToBottom();
     _controller.clear();
 
+    // Use a placeholder message index for the typing indicator
+    final int aiMessageIndex = _messages.length;
     final aiMessagePlaceholder = ChatMessage(text: '', isUser: false);
-    setState(() {
-      _messages.add(aiMessagePlaceholder);
-    });
-    final int aiMessageKey = await _chatBox.add(aiMessagePlaceholder);
+    setState(() => _messages.add(aiMessagePlaceholder));
     _scrollToBottom();
+
+    // The key for the final message in Hive
+    final int aiMessageKey = await _chatBox.add(aiMessagePlaceholder);
+
 
     try {
       _client = http.Client();
@@ -394,7 +318,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         final imageBytes = await _selectedImage!.readAsBytes();
         base64Image = base64Encode(imageBytes);
       }
-      
+      // Since image is now encoded, we can clear the selection from the UI
+      if(mounted) setState(() => _selectedImage = null);
+
       final systemPrompt = _systemPromptController.text.trim();
       final body = {
         'model': _modelController.text,
@@ -413,13 +339,12 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         ..headers['Content-Type'] = 'application/json'
         ..body = jsonEncode(body);
 
-      _clearImage();
 
       final streamedResponse = await _client!.send(request);
       final lines = streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter());
 
       String streamedResponseText = '';
-      
+
       await for (final line in lines) {
         if (mounted) {
           try {
@@ -428,18 +353,13 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
             streamedResponseText += part;
 
             setState(() {
-              _messages[_messages.length - 1] = ChatMessage(text: streamedResponseText, isUser: false);
+              _messages[aiMessageIndex] = ChatMessage(text: streamedResponseText, isUser: false);
             });
             _scrollToBottom();
 
-            if (chunk['done'] == true) {
-              if (chunk['context'] != null) {
-                final newContext = List<int>.from(chunk['context']);
-                setState(() {
-                  _conversationContext = newContext;
-                });
-                await _appStateBox.put('lastContext', newContext);
-              }
+            if (chunk['done'] == true && chunk['context'] != null) {
+                _conversationContext = List<int>.from(chunk['context']);
+                await _appStateBox.put('lastContext', _conversationContext);
             }
           } catch (e) {
             debugPrint('Invalid JSON line: $line');
@@ -451,57 +371,38 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       final finalMessage = ChatMessage(text: finalMessageText, isUser: false);
       await _chatBox.put(aiMessageKey, finalMessage);
 
-      // Speak the AI's response if voice mode is enabled
       if (_voiceModeEnabled && finalMessageText.isNotEmpty) {
-        print("AI Response: '$finalMessageText'. Speaking..."); // Debug print
         await _speak(finalMessageText);
       }
 
     } catch (e) {
-      print("SendMessage Error: $e"); // Debug print
       if (mounted) {
         final finalMessage = _isManuallyStopped
             ? ChatMessage(text: "[Generation stopped by user]", isUser: false)
             : ChatMessage(text: "Error: ${e.toString()}", isUser: false);
-        setState(() {
-          _messages[_messages.length - 1] = finalMessage;
-        });
+        setState(() => _messages[aiMessageIndex] = finalMessage);
         await _chatBox.put(aiMessageKey, finalMessage);
-        // If voice mode is enabled and there's an error, speak it
-        if (_voiceModeEnabled) {
-          await _speak(finalMessage.text);
-        }
+        if (_voiceModeEnabled) await _speak(finalMessage.text);
       }
     } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _isLoading = false);
       _client?.close();
       _client = null;
       _scrollToBottom();
-      // If voice mode is enabled, start listening again after message processing
-      // This is now handled by _initTts.setCompletionHandler if speaking occurred.
-      // If no speaking (e.g., just an error), we need to ensure listening restarts.
+
       if (_voiceModeEnabled && mounted && !_isSpeaking) {
-        print("SendMessage Finally: Restarting listen directly (AI not speaking)."); // Debug print
         _startListeningForVoiceMode();
       }
     }
   }
 
   void _stopGeneration() {
-    print("Stop Generation called."); // Debug print
     if (_isLoading) {
-      setState(() {
-        _isManuallyStopped = true;
-      });
+      setState(() => _isManuallyStopped = true);
       _client?.close();
     }
-    _stopSpeaking(); // Ensures _isSpeaking is false
-    _stopListening(); // Ensures _isListening is false
-    // If voice mode is enabled, start listening again after stopping generation
+    _stopSpeaking();
+    _stopListening();
     if (_voiceModeEnabled && mounted) {
       _startListeningForVoiceMode();
     }
@@ -527,10 +428,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         _messages.clear();
         _conversationContext = null;
       });
-      // Stop listening and speaking when clearing conversation
       await _stopListening();
       await _stopSpeaking();
-      // If voice mode is enabled, start listening again after clearing conversation
       if (_voiceModeEnabled) {
         _startListeningForVoiceMode();
       }
@@ -539,7 +438,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   @override
   void dispose() {
-    print("Dispose called."); // Debug print
     _controller.dispose();
     _scrollController.dispose();
     _baseUrlController.dispose();
@@ -552,7 +450,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _flutterTts.stop();
     super.dispose();
   }
-  
+
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
@@ -565,38 +463,31 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     });
   }
 
-  // Function to toggle voice mode
   void _toggleVoiceMode() async {
-    setState(() {
-      _voiceModeEnabled = !_voiceModeEnabled;
-    });
-    await _appStateBox.put('voiceModeEnabled', _voiceModeEnabled); // Persist state
+    setState(() => _voiceModeEnabled = !_voiceModeEnabled);
+    await _appStateBox.put('voiceModeEnabled', _voiceModeEnabled);
 
     if (_voiceModeEnabled) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: const Text('Voice Mode ON. Speak to chat.'),
-          duration: const Duration(seconds: 2), // Shortened duration
-          behavior: SnackBarBehavior.floating, // Make it floating
-          // NEW: To make it higher, we set a vertical offset.
-          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150), // Example: ~150px from top
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150, left: 16, right: 16),
         ),
       );
-      // Start listening automatically when voice mode is enabled
       _startListeningForVoiceMode();
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: const Text('Voice Mode OFF.'),
-          duration: const Duration(seconds: 2), // Shortened duration
-          behavior: SnackBarBehavior.floating, // Make it floating
-          // NEW: To make it higher, we set a vertical offset.
-          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150), // Example: ~150px from top
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150, left: 16, right: 16),
         ),
       );
-      // Stop listening when voice mode is disabled
       await _stopListening();
-      await _stopSpeaking(); // Ensure speaking stops too
+      await _stopSpeaking();
     }
   }
 
@@ -605,24 +496,20 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Cortex'),
+        title: const Text('HAL 9000'),
         shape: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.outlineVariant, width: 0.5)),
         actions: [
-          // THEME TOGGLE: Add the new button to the AppBar.
           IconButton(
             icon: Icon(
-              // Check the app's brightness to determine which icon to show.
               Theme.of(context).brightness == Brightness.dark
                   ? Icons.light_mode_outlined
                   : Icons.dark_mode_outlined,
             ),
             tooltip: 'Toggle Theme',
             onPressed: () {
-              // Determine the current brightness and toggle to the opposite mode.
               final newTheme = Theme.of(context).brightness == Brightness.dark
                   ? ThemeMode.light
                   : ThemeMode.dark;
-              // Call the changeTheme method from MyApp to update the state.
               MyApp.of(context).changeTheme(newTheme);
             },
           ),
@@ -630,26 +517,32 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Settings', onPressed: () => _showSettingsDialog(context)),
         ],
       ),
-      // Use Stack to overlay the Voice Mode Feedback
       body: Stack(
         children: [
           Column(
             children: [
               Expanded(
-                child: ListView.builder(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.all(8.0),
-                  itemCount: _messages.length,
-                  itemBuilder: (context, index) {
-                    final message = _messages[index];
-                    return ChatBubble(
-                      message: message,
-                      // Speak only if voice mode is OFF (manual control)
-                      onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
-                      onCopy: message.isUser ? null : _copyToClipboard,
-                    );
-                  },
-                ),
+                // NEW: Show a welcome message if the chat is empty
+                child: _messages.isEmpty
+                    ? _buildEmptyState()
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.all(8.0),
+                        itemCount: _messages.length,
+                        itemBuilder: (context, index) {
+                          final message = _messages[index];
+                          // NEW: If it's the last message and we are loading, show typing indicator
+                          if (index == _messages.length - 1 && _isLoading && !message.isUser) {
+                            return const TypingIndicator();
+                          }
+                          return ChatBubble(
+                            message: message,
+                            onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
+                            onCopy: message.isUser ? null : _copyToClipboard,
+                            imagePath: message.imagePath,
+                          );
+                        },
+                      ),
               ),
               if (_selectedImage != null)
                 Padding(
@@ -663,12 +556,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                         ),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(8.0),
-                          child: Image.file(
-                            _selectedImage!,
-                            height: 100,
-                            width: 100,
-                            fit: BoxFit.cover,
-                          ),
+                          child: Image.file(_selectedImage!, height: 100, width: 100, fit: BoxFit.cover),
                         ),
                       ),
                       Positioned(
@@ -677,10 +565,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                         child: InkWell(
                           onTap: _clearImage,
                           child: Container(
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.5),
-                              shape: BoxShape.circle,
-                            ),
+                            decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
                             child: const Icon(Icons.close, color: Colors.white, size: 18),
                           ),
                         ),
@@ -691,11 +576,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               _buildInputArea(context),
             ],
           ),
-          // Voice Mode Feedback Overlay - MOVED TO TOP
           if (_voiceModeEnabled)
             Positioned(
-              // Adjusted top position
-              top: 8.0 + MediaQuery.of(context).padding.top, // Padding from top + safe area
+              top: 8.0 + MediaQuery.of(context).padding.top,
               left: 0,
               right: 0,
               child: VoiceModeFeedbackOverlay(
@@ -705,6 +588,58 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 onExitVoiceMode: _toggleVoiceMode,
               ),
             ),
+        ],
+      ),
+      floatingActionButton: Padding(
+        // CHANGED: Increased bottom padding slightly
+        padding: const EdgeInsets.only(bottom: 80.0),
+        child: FloatingActionButton(
+          onPressed: _speechEnabled ? _toggleVoiceMode : null,
+          backgroundColor: _voiceModeEnabled && _isListening
+              ? Theme.of(context).colorScheme.primary
+              : Theme.of(context).colorScheme.surfaceContainerHighest,
+          elevation: 4.0,
+          shape: const CircleBorder(),
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            transitionBuilder: (Widget child, Animation<double> animation) {
+              return ScaleTransition(scale: animation, child: child);
+            },
+            child: Icon(
+              _voiceModeEnabled
+                  ? (_isListening ? Icons.mic : Icons.record_voice_over)
+                  : Icons.voice_chat,
+              key: ValueKey<bool>(_voiceModeEnabled && _isListening),
+              color: _voiceModeEnabled && _isListening
+                  ? Theme.of(context).colorScheme.onPrimary
+                  : Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+          tooltip: _voiceModeEnabled ? 'Exit Voice Mode' : 'Enter Voice Mode',
+        ),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+    );
+  }
+
+  // NEW: Empty state widget
+  Widget _buildEmptyState() {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.auto_awesome, size: 64.0),
+          SizedBox(height: 16.0),
+          Text(
+            "Welcome to HAL 9000",
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          ),
+          SizedBox(height: 8.0),
+          Text(
+            "Type a message, attach an image,\nor use voice mode to begin.",
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 16),
+          ),
         ],
       ),
     );
@@ -723,19 +658,34 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    TextField(controller: _baseUrlController, decoration: const InputDecoration(labelText: 'Ollama Base URL', hintText: 'e.g., http://localhost:11434', border: OutlineInputBorder(), isDense: true)),
-                    const SizedBox(height: 16.0),
-                    TextField(controller: _modelController, decoration: const InputDecoration(labelText: 'Model Name', hintText: 'e.g., llava, llama3', border: OutlineInputBorder(), isDense: true)),
+                    // --- PERSISTENCE: Save settings on change ---
+                    Text('Connection', style: Theme.of(context).textTheme.titleMedium),
+                    const SizedBox(height: 8.0),
+                    TextField(
+                      controller: _baseUrlController,
+                      decoration: const InputDecoration(labelText: 'HAL 9000 Base URL', border: OutlineInputBorder(), isDense: true),
+                      onChanged: (value) => _appStateBox.put('baseUrl', value),
+                    ),
+                    const Divider(height: 32.0),
+                    Text('Model', style: Theme.of(context).textTheme.titleMedium),
+                    const SizedBox(height: 8.0),
+                    TextField(
+                      controller: _modelController,
+                      decoration: const InputDecoration(labelText: 'Model Name', border: OutlineInputBorder(), isDense: true),
+                      onChanged: (value) => _appStateBox.put('modelName', value),
+                    ),
                     const SizedBox(height: 16.0),
                     TextField(
                       controller: _systemPromptController,
                       decoration: const InputDecoration(labelText: 'System Prompt (AI Memory)', border: OutlineInputBorder()),
                       maxLines: 8,
+                      // Listener is already attached in initState
                     ),
                     const SizedBox(height: 16.0),
                     TextField(
                       controller: _suffixController,
                       decoration: const InputDecoration(labelText: 'Suffix', hintText: 'Text to append after response', border: OutlineInputBorder()),
+                      onChanged: (value) => _appStateBox.put('suffix', value),
                     ),
                     const SizedBox(height: 16.0),
                     Row(
@@ -745,39 +695,35 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                         Switch(
                           value: _shouldThink,
                           onChanged: (value) {
-                            dialogSetState(() {
-                              _shouldThink = value;
-                            });
+                            dialogSetState(() => _shouldThink = value);
+                            _appStateBox.put('shouldThink', value);
                           },
                         ),
                       ],
                     ),
                     Padding(
                       padding: const EdgeInsets.only(top: 4.0),
-                      child: Text(
-                        "Note: For supported models only.",
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
+                      child: Text("Note: For supported models only.", style: Theme.of(context).textTheme.bodySmall),
                     ),
                     const Divider(height: 32.0),
-                    Text('Speech Speed', style: Theme.of(context).textTheme.titleMedium),
+                    Text('Speech', style: Theme.of(context).textTheme.titleMedium),
+                    const SizedBox(height: 8.0),
+                    Text('Speech Speed', style: Theme.of(context).textTheme.labelLarge),
                     Slider(
-                      value: _speechRate,
-                      min: 0.1, max: 2.0, divisions: 19,
+                      value: _speechRate, min: 0.1, max: 2.0, divisions: 19,
                       label: _speechRate.toStringAsFixed(1),
                       onChanged: (newRate) {
-                        dialogSetState(() { _speechRate = newRate; });
+                        dialogSetState(() => _speechRate = newRate);
                         _appStateBox.put('speechRate', newRate);
                       },
                     ),
                     const SizedBox(height: 16.0),
-                    Text('Speech Pitch', style: Theme.of(context).textTheme.titleMedium),
+                    Text('Speech Pitch', style: Theme.of(context).textTheme.labelLarge),
                     Slider(
-                      value: _speechPitch,
-                      min: 0.5, max: 2.0, divisions: 15,
+                      value: _speechPitch, min: 0.5, max: 2.0, divisions: 15,
                       label: _speechPitch.toStringAsFixed(1),
                       onChanged: (newPitch) {
-                        dialogSetState(() { _speechPitch = newPitch; });
+                        dialogSetState(() => _speechPitch = newPitch);
                         _appStateBox.put('speechPitch', newPitch);
                       },
                     ),
@@ -802,38 +748,26 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           children: [
             IconButton(
               icon: const Icon(Icons.attach_file_outlined),
-              onPressed: _pickImage,
+              // CHANGED: Disable button while loading
+              onPressed: _isLoading ? null : _pickImage,
               tooltip: 'Attach Image',
             ),
-            // Conditional microphone button for manual speech input
-            if (!_voiceModeEnabled) // Only show microphone for manual input when voice mode is off
+            if (!_voiceModeEnabled)
               IconButton(
                 icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
                 color: _isListening ? Theme.of(context).colorScheme.primary : null,
-                onPressed: !_speechEnabled ? null : (_isListening ? _stopListening : _startListeningManual),
+                // CHANGED: Disable button while loading
+                onPressed: !_speechEnabled || _isLoading ? null : (_isListening ? _stopListening : _startListeningManual),
                 tooltip: _isListening ? 'Stop listening' : 'Listen',
               ),
-            // Voice Mode Toggle Button with dynamic icons based on state
-            IconButton(
-              icon: Icon(
-                _voiceModeEnabled
-                    ? (_isListening ? Icons.mic : Icons.record_voice_over) // If voice mode, show mic if listening, else record_voice_over
-                    : Icons.voice_chat, // If not in voice mode, show voice_chat (toggle to voice mode)
-              ),
-              color: _voiceModeEnabled
-                  ? (_isListening ? Theme.of(context).colorScheme.primary : null) // If voice mode, color primary if listening
-                  : null, // No specific color if not in voice mode
-              onPressed: _speechEnabled ? _toggleVoiceMode : null,
-              tooltip: _voiceModeEnabled ? 'Exit Voice Mode' : 'Enter Voice Mode',
-            ),
             Expanded(
               child: TextField(
                 controller: _controller,
-                // Disable onSubmitted if in voice mode or loading
-                onSubmitted: (_voiceModeEnabled || _isLoading) ? null : (text) => _sendMessage(text),
+                // CHANGED: Disable submission when loading or in voice mode
+                onSubmitted: (_isLoading || _voiceModeEnabled) ? null : (text) => _sendMessage(text),
                 enabled: !_isLoading,
                 decoration: InputDecoration(
-                  hintText: 'Message Ollama...',
+                  hintText: _isListening ? 'Listening...' : 'Message HAL 9000...',
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(30.0), borderSide: BorderSide.none),
                   filled: true,
                   fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -852,7 +786,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   foregroundColor: WidgetStateProperty.all(Theme.of(context).colorScheme.onError),
                 ),
               )
-            // Hide send button if in voice mode
             else if (!_voiceModeEnabled)
               IconButton.filled(
                 icon: const Icon(Icons.send_rounded),
@@ -871,11 +804,13 @@ class ChatBubble extends StatelessWidget {
   final ChatMessage message;
   final void Function(String text)? onSpeak;
   final void Function(String text)? onCopy;
+  final String? imagePath;
 
   const ChatBubble({
     required this.message,
     this.onSpeak,
     this.onCopy,
+    this.imagePath,
     super.key,
   });
 
@@ -883,6 +818,23 @@ class ChatBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isUser = message.isUser;
+
+    // CORRECTED: This stylesheet is now valid.
+    final markdownStyle = MarkdownStyleSheet.fromTheme(theme).copyWith(
+      p: theme.textTheme.bodyLarge,
+      // The 'code' parameter styles the text inside BOTH inline code and code blocks.
+      code: theme.textTheme.bodyMedium!.copyWith(
+        fontFamily: 'monospace',
+        // This background color applies to inline `code` snippets.
+        backgroundColor: theme.colorScheme.onSurface.withOpacity(0.1),
+      ),
+      // 'codeblockDecoration' styles the entire block container.
+      codeblockDecoration: BoxDecoration(
+        color: theme.colorScheme.surface, // Background for the whole block
+        borderRadius: BorderRadius.circular(8.0),
+        border: Border.all(color: theme.dividerColor),
+      ),
+    );
 
     return Column(
       crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -892,9 +844,9 @@ class ChatBubble extends StatelessWidget {
           mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
           children: [
             if (!isUser)
-              const Padding(
-                padding: EdgeInsets.only(right: 8.0, top: 4.0),
-                child: CircleAvatar(child: Icon(Icons.auto_awesome)),
+              Padding(
+                padding: const EdgeInsets.only(right: 8.0, top: 4.0),
+                child: CircleAvatar(child: Icon(Icons.auto_awesome, color: theme.colorScheme.onPrimaryContainer)),
               ),
             Flexible(
               child: Container(
@@ -905,9 +857,53 @@ class ChatBubble extends StatelessWidget {
                   borderRadius: BorderRadius.circular(16.0),
                 ),
                 child: SelectionArea(
-                  child: MarkdownBody(
-                    data: message.text.isEmpty ? '...' : message.text,
-                    styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(p: theme.textTheme.bodyLarge),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (imagePath != null)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8.0),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8.0),
+                            child: Image.file(
+                              File(imagePath!),
+                              height: 150,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                      MarkdownBody(
+                        data: message.text,
+                        styleSheet: markdownStyle,
+                      ),
+                      // CHANGED: Moved action buttons here, inside the bubble
+                      if (!isUser && message.text.isNotEmpty && (onSpeak != null || onCopy != null))
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8.0),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min, // Take only needed space
+                            children: [
+                              if (onSpeak != null)
+                                IconButton(
+                                  icon: const Icon(Icons.volume_up_outlined),
+                                  iconSize: 20,
+                                  visualDensity: VisualDensity.compact,
+                                  tooltip: 'Read aloud',
+                                  onPressed: () => onSpeak!(message.text),
+                                ),
+                              if (onCopy != null)
+                                IconButton(
+                                  icon: const Icon(Icons.copy_outlined),
+                                  iconSize: 20,
+                                  visualDensity: VisualDensity.compact,
+                                  tooltip: 'Copy text',
+                                  onPressed: () => onCopy!(message.text),
+                                ),
+                            ],
+                          ),
+                        )
+                    ],
                   ),
                 ),
               ),
@@ -919,36 +915,84 @@ class ChatBubble extends StatelessWidget {
               ),
           ],
         ),
-        // Only show speak/copy buttons if onSpeak or onCopy are provided (i.e., not in full voice mode)
-        if (!isUser && message.text.isNotEmpty && (onSpeak != null || onCopy != null))
-          Padding(
-            padding: const EdgeInsets.only(left: 48.0, right: 48.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.start,
-              children: [
-                if (onSpeak != null)
-                  IconButton(
-                    icon: const Icon(Icons.volume_up_outlined),
-                    iconSize: 20,
-                    tooltip: 'Read aloud',
-                    onPressed: () => onSpeak!(message.text),
-                  ),
-                if (onCopy != null)
-                  IconButton(
-                    icon: const Icon(Icons.copy_outlined),
-                    iconSize: 20,
-                    tooltip: 'Copy text',
-                    onPressed: () => onCopy!(message.text),
-                  ),
-              ],
-            ),
-          )
       ],
     );
   }
 }
 
-// Floating Modal Widget for Voice Mode Feedback
+// NEW: Animated typing indicator widget
+class TypingIndicator extends StatefulWidget {
+  const TypingIndicator({super.key});
+
+  @override
+  State<TypingIndicator> createState() => _TypingIndicatorState();
+}
+
+class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14.0, horizontal: 8.0),
+      child: Row(
+        children: [
+           Padding(
+            padding: const EdgeInsets.only(right: 8.0, top: 4.0),
+            child: CircleAvatar(child: Icon(Icons.auto_awesome, color: theme.colorScheme.onPrimaryContainer)),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(16.0),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(3, (index) {
+                return FadeTransition(
+                  opacity: Tween(begin: 0.3, end: 1.0).animate(
+                    CurvedAnimation(
+                      parent: _controller,
+                      curve: Interval(index * 0.2, (index * 0.2) + 0.6, curve: Curves.easeInOut),
+                    ),
+                  ),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.onSurface,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
 class VoiceModeFeedbackOverlay extends StatelessWidget {
   final bool isListening;
   final bool isSpeaking;
@@ -964,59 +1008,43 @@ class VoiceModeFeedbackOverlay extends StatelessWidget {
   });
 
   String get _statusText {
-    if (isLoading) {
-      return "Processing...";
-    } else if (isSpeaking) {
-      return "Speaking...";
-    } else if (isListening) {
-      return "Listening...";
-    }
-    return "Voice Mode Active"; // Default when not actively doing anything
+    if (isLoading) return "Processing...";
+    if (isSpeaking) return "Speaking...";
+    if (isListening) return "Listening...";
+    return "Voice Mode Active";
   }
 
   IconData get _statusIcon {
-    if (isLoading) {
-      return Icons.hourglass_empty;
-    } else if (isSpeaking) {
-      return Icons.volume_up;
-    } else if (isListening) {
-      return Icons.mic;
-    }
+    if (isLoading) return Icons.hourglass_empty;
+    if (isSpeaking) return Icons.volume_up;
+    if (isListening) return Icons.mic;
     return Icons.record_voice_over;
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Padding( // Added padding for horizontal spacing
+    return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20.0),
       child: Card(
-        // Removed Center widget here, padding takes care of horizontal margin
         color: theme.colorScheme.primaryContainer,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20.0)),
         elevation: 8.0,
         child: Padding(
-          padding: const EdgeInsets.all(16.0),
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
           child: Row(
-            mainAxisSize: MainAxisSize.max, // Make the row take full width available
-            mainAxisAlignment: MainAxisAlignment.spaceBetween, // Distribute space
+            mainAxisSize: MainAxisSize.max,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Icon(
-                _statusIcon,
-                color: theme.colorScheme.onPrimaryContainer,
-                size: 30,
-              ),
+              Icon(_statusIcon, color: theme.colorScheme.onPrimaryContainer, size: 30),
               const SizedBox(width: 12.0),
-              Expanded( // Allow text to take remaining space
+              Expanded(
                 child: Text(
                   _statusText,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onPrimaryContainer,
-                  ),
-                  overflow: TextOverflow.ellipsis, // Handle long text
+                  style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onPrimaryContainer),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              // const SizedBox(width: 20.0), // Removed as spaceBetween handles it
               IconButton(
                 icon: const Icon(Icons.close),
                 color: theme.colorScheme.onPrimaryContainer,
