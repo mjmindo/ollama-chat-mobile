@@ -365,7 +365,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         }
       },
       listenFor: const Duration(minutes: 5),
-      pauseFor: const Duration(seconds: 3),
+      pauseFor: const Duration(seconds: 15),
       partialResults: true,
     );
     if (mounted) setState(() => _isListening = true);
@@ -377,6 +377,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       await _speechToText.listen(
         onResult: (result) =>
             setState(() => _controller.text = result.recognizedWords),
+        listenFor: const Duration(seconds: 60),
+        pauseFor: const Duration(seconds: 15),
       );
       if (mounted) setState(() => _isListening = true);
     }
@@ -388,7 +390,39 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     if (mounted) setState(() => _isListening = false);
   }
 
+  String _stripEmojis(String text) {
+    // A more precise regular expression to remove emojis and symbols
+    // without removing punctuation like '...'
+    final regex = RegExp(
+      r'['
+      '\u00a9\u00ae\u203c\u2049\u2122\u2139\u2194-\u2199\u21a9-\u21aa\u231a\u231b\u2328\u23cf\u23e9-\u23f3\u23f8-\u23fa\u24c2\u25aa\u25ab\u25b6\u25c0\u25fb-\u25fe\u2600-\u26fd\u2700-\u27bf\u2934\u2935\u2b05-\u2b07\u2b1b\u2b1c\u2b50\u2b55\u3030\u303d\u3297\u3299'
+      ']'
+      r'|\ud83c[\ud000-\udfff]' // U+1F000 to U+1F2FF
+      r'|\ud83d[\ud000-\udfff]' // U+1F300 to U+1F5FF
+      r'|\ud83e[\ud000-\udfff]', // U+1F600 to U+1F9FF
+      unicode: true,
+    );
+
+    // Replace all emojis with a space to avoid words mashing together
+    return text.replaceAll(regex, ' ');
+  }
+
   Future<void> _speak(String text, dynamic messageKey) async {
+    // First, strip any emojis from the text
+    final cleanText = _stripEmojis(text);
+
+    // If the text is empty after removing emojis, don't try to speak
+    if (cleanText.trim().isEmpty) {
+      // If there was nothing to speak, ensure the speaking state is cleared
+      if (mounted && _currentlySpeakingMessageKey == messageKey) {
+        setState(() {
+          _isSpeaking = false;
+          _currentlySpeakingMessageKey = null;
+        });
+      }
+      return;
+    }
+
     await _flutterTts.setLanguage("en-US");
     await _flutterTts.setPitch(_speechPitch);
     await _flutterTts.setSpeechRate(_speechRate);
@@ -397,7 +431,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         _currentlySpeakingMessageKey = messageKey;
       });
     }
-    await _flutterTts.speak(text);
+    // Speak the cleaned text
+    await _flutterTts.speak(cleanText);
   }
 
   Future<void> _stopSpeaking() async {
@@ -1078,8 +1113,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                     : (text) => _sendMessage(text),
                 enabled: !_isLoading,
                 decoration: InputDecoration(
-                  hintText:
-                      _isListening ? 'Listening...' : 'Message HAL...',
+                  hintText: _isListening ? 'Listening...' : 'Message HAL...',
                   border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(30.0),
                       borderSide: BorderSide.none),
