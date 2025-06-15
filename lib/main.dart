@@ -163,8 +163,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   // REFACTOR: Define the listener as a separate function to fix memory leak.
   void _saveSystemPrompt() {
-    _appStateBox.put(
-        'systemPrompt', Hive.box('appState').get('systemPrompt'));
+    _appStateBox.put('systemPrompt', Hive.box('appState').get('systemPrompt'));
   }
 
   @override
@@ -359,20 +358,32 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     if (mounted) setState(() => _isListening = false);
   }
 
-  String _stripEmojis(String text) {
-    final regex = RegExp(
-        r'['
-        '\u00a9\u00ae\u203c\u2049\u2122\u2139\u2194-\u2199\u21a9-\u21aa\u231a\u231b\u2328\u23cf\u23e9-\u23f3\u23f8-\u23fa\u24c2\u25aa\u25ab\u25b6\u25c0\u25fb-\u25fe\u2600-\u26fd\u2700-\u27bf\u2934\u2935\u2b05-\u2b07\u2b1b\u2b1c\u2b50\u2b55\u3030\u303d\u3297\u3299'
-        ']'
-        r'|\ud83c[\ud000-\udfff]'
-        r'|\ud83d[\ud000-\udfff]'
-        r'|\ud83e[\ud000-\udfff]',
-        unicode: true);
-    return text.replaceAll(regex, ' ');
+  String _cleanTextForTts(String text) {
+    // A more powerful, comprehensive regex for modern emojis, including modifiers and joiners.
+    final emojiRegex = RegExp(
+        r'(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])');
+
+    // Chain all text cleaning operations for clarity and robustness
+    return text
+        // 1. Remove markdown characters
+        .replaceAll(RegExp(r'\*{1,3}'), '') // Removes *, **, and ***
+        .replaceAll('_', '') // Removes underscores for italics
+        .replaceAll(RegExp(r'`{1,3}'), '') // Removes `, `` and ``` for code
+
+        // 2. Normalize punctuation for pauses
+        .replaceAll('...', ', ') // Replace ellipses with a comma
+        .replaceAll('\n', '. ') // Replace newlines with a period
+        .replaceAll(':', ', ') // Replace colons with a comma
+        .replaceAll('-', ', ') // Replace dashes with a comma
+
+        // 3. Replace all found emojis with a space
+        .replaceAll(emojiRegex, ' ');
   }
 
   Future<void> _speak(String text, dynamic messageKey) async {
-    final cleanText = _stripEmojis(text);
+    // CHANGED THIS LINE to use the new function
+    final cleanText = _cleanTextForTts(text);
+
     if (cleanText.trim().isEmpty) {
       if (mounted && _currentlySpeakingMessageKey == messageKey) {
         setState(() {
@@ -382,14 +393,30 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       }
       return;
     }
-    await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setPitch(_appStateBox.get('speechPitch', defaultValue: 1.1));
-    await _flutterTts.setSpeechRate(_appStateBox.get('speechRate', defaultValue: 0.7));
+
+    // (The rest of the function remains exactly the same)
+    final savedVoiceMap = _appStateBox.get('selectedVoiceMap') as Map?;
+    final savedRate = _appStateBox.get('speechRate', defaultValue: 0.7);
+    final savedPitch = _appStateBox.get('speechPitch', defaultValue: 1.1);
+
+    await _flutterTts.stop();
+
+    if (savedVoiceMap != null) {
+      final voice = Map<String, String>.from(savedVoiceMap);
+      await _flutterTts.setVoice(voice);
+    } else {
+      await _flutterTts.setLanguage("en-US");
+    }
+
+    await _flutterTts.setPitch(savedPitch);
+    await _flutterTts.setSpeechRate(savedRate);
+
     if (mounted) {
       setState(() {
         _currentlySpeakingMessageKey = messageKey;
       });
     }
+
     await _flutterTts.speak(cleanText);
   }
 
@@ -429,7 +456,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   }
 
   void _clearImage() => setState(() => _selectedImage = null);
-  
+
   // REFACTOR: Created a dedicated, reusable error handling function.
   Future<void> _handleError(String errorMessage, int messageKey) async {
     if (mounted && !_isManuallyStopped) {
@@ -464,7 +491,10 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _scrollToBottom();
     _controller.clear();
 
-    if (_messageBox.values.where((m) => m.conversationId == currentConversation.id).length == 1 &&
+    if (_messageBox.values
+                .where((m) => m.conversationId == currentConversation.id)
+                .length ==
+            1 &&
         currentConversation.title == "New Chat") {
       final newTitle = text.trim().length > 30
           ? "${text.trim().substring(0, 30)}..."
@@ -501,7 +531,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         'think': _appStateBox.get('shouldThink', defaultValue: false),
         if (systemPrompt.isNotEmpty) 'system': systemPrompt,
         if (base64Image != null) 'images': [base64Image],
-        if (currentConversation.context != null) 'context': currentConversation.context,
+        if (currentConversation.context != null)
+          'context': currentConversation.context,
       };
 
       final request = http.Request(
@@ -544,17 +575,23 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       if (_voiceModeEnabled && streamedResponseText.trim().isNotEmpty) {
         await _speak(streamedResponseText.trim(), aiMessageKey);
       }
-    // REFACTOR: Catching specific, expected exceptions for better user feedback.
+      // REFACTOR: Catching specific, expected exceptions for better user feedback.
     } on http.ClientException catch (_) {
-        _handleError("Network Error: Could not connect to the server. Please check your Base URL and connection in settings.", aiMessageKey);
+      _handleError(
+          "Network Error: Could not connect to the server. Please check your Base URL and connection in settings.",
+          aiMessageKey);
     } on SocketException catch (_) {
-        _handleError("Network Error: Could not reach the server. Is HAL running at that address?", aiMessageKey);
-    } on FormatException catch(_) {
-        _handleError("Error: Received an invalid response from the server.", aiMessageKey);
+      _handleError(
+          "Network Error: Could not reach the server. Is HAL running at that address?",
+          aiMessageKey);
+    } on FormatException catch (_) {
+      _handleError(
+          "Error: Received an invalid response from the server.", aiMessageKey);
     } catch (e) {
-        if (!_isManuallyStopped) {
-            _handleError("An unexpected error occurred: ${e.toString()}", aiMessageKey);
-        }
+      if (!_isManuallyStopped) {
+        _handleError(
+            "An unexpected error occurred: ${e.toString()}", aiMessageKey);
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
       _client?.close();
@@ -671,7 +708,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           onTap: _scrollToTop,
           child: Tooltip(
             message: 'Scroll to Top',
-            child: Text(_activeConversation?.title ?? 'HAL', overflow: TextOverflow.ellipsis),
+            child: Text(_activeConversation?.title ?? 'HAL',
+                overflow: TextOverflow.ellipsis),
           ),
         ),
         shape: Border(
@@ -697,9 +735,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           IconButton(
               icon: const Icon(Icons.settings_outlined),
               tooltip: 'Settings',
-              onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (context) => const SettingsPage()))
-          ),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (context) => const SettingsPage()))),
         ],
       ),
       drawer: _buildConversationDrawer(),
@@ -713,13 +750,14 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   valueListenable: _messageBox.listenable(),
                   builder: (context, Box<ChatMessage> box, _) {
                     final currentMessages = box.values
-                        .where((msg) => msg.conversationId == _activeConversation?.id)
+                        .where((msg) =>
+                            msg.conversationId == _activeConversation?.id)
                         .toList();
 
                     if (currentMessages.isEmpty) {
                       return _buildEmptyState();
                     }
-                    
+
                     return Scrollbar(
                       controller: _scrollController,
                       thumbVisibility: true,
@@ -732,7 +770,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                         itemCount: currentMessages.length,
                         itemBuilder: (context, index) {
                           final message = currentMessages[index];
-                          final isCurrentlySpeaking = message.key == _currentlySpeakingMessageKey;
+                          final isCurrentlySpeaking =
+                              message.key == _currentlySpeakingMessageKey;
 
                           if (index == currentMessages.length - 1 &&
                               _isLoading &&
@@ -744,7 +783,9 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                             message: message,
                             messageKey: message.key,
                             isCurrentlySpeaking: isCurrentlySpeaking,
-                            onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
+                            onSpeak: message.isUser || _voiceModeEnabled
+                                ? null
+                                : _speak,
                             onStop: _stopSpeaking,
                             onCopy: message.isUser ? null : _copyToClipboard,
                           );
@@ -771,7 +812,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                                 height: 100, width: 100, fit: BoxFit.cover)),
                       ),
                       Positioned(
-                        top: 4, right: 4,
+                        top: 4,
+                        right: 4,
                         child: InkWell(
                           onTap: _clearImage,
                           child: Container(
@@ -799,7 +841,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
             ],
           ),
           Positioned(
-            right: 16.0, bottom: 170.0,
+            right: 16.0,
+            bottom: 170.0,
             child: AnimatedOpacity(
               opacity: _showScrollDownButton ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 300),
@@ -812,7 +855,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
             ),
           ),
           Positioned(
-            right: 10.0, bottom: 90.0,
+            right: 10.0,
+            bottom: 90.0,
             child: FloatingActionButton(
               onPressed: _speechEnabled ? _toggleVoiceMode : null,
               backgroundColor: _voiceModeEnabled && _isListening
