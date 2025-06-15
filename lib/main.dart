@@ -5,6 +5,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:uuid/uuid.dart';
 
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -12,11 +13,19 @@ import 'package:image_picker/image_picker.dart';
 
 part 'main.g.dart';
 
+const uuid = Uuid();
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
+
+  // NEW: Register all adapters
+  Hive.registerAdapter(ConversationAdapter());
   Hive.registerAdapter(ChatMessageAdapter());
-  await Hive.openBox<ChatMessage>('chatHistory');
+
+  // NEW: Open all necessary boxes
+  await Hive.openBox<Conversation>('conversations');
+  await Hive.openBox<ChatMessage>('messages');
   await Hive.openBox('appState'); // For settings
 
   runApp(const MyApp());
@@ -69,7 +78,6 @@ class _MyAppState extends State<MyApp> {
       themeMode: _themeMode,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          // CHANGED: Using a different color for a more modern feel
           seedColor: Colors.deepPurple,
           brightness: Brightness.light,
         ),
@@ -77,7 +85,6 @@ class _MyAppState extends State<MyApp> {
       ),
       darkTheme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          // CHANGED: Using a different color for a more modern feel
           seedColor: Colors.deepPurple,
           brightness: Brightness.dark,
         ),
@@ -88,17 +95,37 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
+// NEW: Model for a conversation session
+@HiveType(typeId: 1)
+class Conversation extends HiveObject {
+  @HiveField(0)
+  String id;
+
+  @HiveField(1)
+  String title;
+
+  @HiveField(2)
+  List<int>? context;
+
+  @HiveField(3)
+  DateTime createdAt;
+
+  Conversation({required this.id, required this.title, this.context, required this.createdAt});
+}
+
 
 @HiveType(typeId: 0)
-class ChatMessage {
+class ChatMessage extends HiveObject {
   @HiveField(0)
-  final String text;
+  String text; // <-- 'final' removed
   @HiveField(1)
   final bool isUser;
   @HiveField(2)
   final String? imagePath;
+  @HiveField(3)
+  final String conversationId;
 
-  ChatMessage({required this.text, required this.isUser, this.imagePath});
+  ChatMessage({required this.text, required this.isUser, this.imagePath, required this.conversationId});
 }
 
 class OllamaChatPage extends StatefulWidget {
@@ -110,7 +137,7 @@ class OllamaChatPage extends StatefulWidget {
 
 class _OllamaChatPageState extends State<OllamaChatPage> {
   final _controller = TextEditingController();
-  List<ChatMessage> _messages = [];
+  // List<ChatMessage> _messages = []; // This will now be dynamically loaded
   bool _isLoading = false;
   final ScrollController _scrollController = ScrollController();
   late TextEditingController _baseUrlController;
@@ -123,9 +150,16 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   http.Client? _client;
   bool _isManuallyStopped = false;
-  late Box<ChatMessage> _chatBox;
+
+  // NEW: Hive boxes
+  late Box<ChatMessage> _messageBox;
+  late Box<Conversation> _conversationBox;
   late Box _appStateBox;
-  List<int>? _conversationContext;
+  
+  // NEW: State for multi-conversation
+  Conversation? _activeConversation;
+  List<Conversation> _conversations = [];
+
 
   final SpeechToText _speechToText = SpeechToText();
   final FlutterTts _flutterTts = FlutterTts();
@@ -141,12 +175,13 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
   @override
   void initState() {
     super.initState();
-    _chatBox = Hive.box<ChatMessage>('chatHistory');
+    _messageBox = Hive.box<ChatMessage>('messages');
+    _conversationBox = Hive.box<Conversation>('conversations');
     _appStateBox = Hive.box('appState');
-
+    
     // --- PERSISTENCE: Load all settings from Hive ---
     _baseUrlController = TextEditingController(text: _appStateBox.get('baseUrl', defaultValue: 'http://localhost:11434'));
-    _modelController = TextEditingController(text: _appStateBox.get('modelName', defaultValue: 'gemma3:1B'));
+    _modelController = TextEditingController(text: _appStateBox.get('modelName', defaultValue: 'gemma:2b'));
     _systemPromptController = TextEditingController(text: _appStateBox.get('systemPrompt', defaultValue: ''));
     _suffixController = TextEditingController(text: _appStateBox.get('suffix', defaultValue: ''));
     _shouldThink = _appStateBox.get('shouldThink', defaultValue: false);
@@ -154,11 +189,19 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     _speechPitch = _appStateBox.get('speechPitch', defaultValue: 1.0);
     _voiceModeEnabled = _appStateBox.get('voiceModeEnabled', defaultValue: false);
 
-    _messages = _chatBox.values.toList();
-    _conversationContext = _appStateBox.get('lastContext')?.cast<int>();
-
-    // Add listeners to save settings on change
     _systemPromptController.addListener(() => _appStateBox.put('systemPrompt', _systemPromptController.text));
+    
+    // NEW: Load conversations and set active one
+    _loadConversations();
+    final lastActiveId = _appStateBox.get('lastActiveConversationId');
+    if (lastActiveId != null && _conversationBox.containsKey(lastActiveId)) {
+      _setActiveConversation(lastActiveId);
+    } else if (_conversations.isNotEmpty) {
+      _setActiveConversation(_conversations.first.id);
+    } else {
+      _createNewConversation();
+    }
+
 
     _initSpeech();
     _initTts();
@@ -167,6 +210,87 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       _startListeningForVoiceMode();
     }
   }
+  
+  // NEW: Get messages for the active conversation
+  List<ChatMessage> get _messages {
+    if (_activeConversation == null) return [];
+    return _messageBox.values.where((msg) => msg.conversationId == _activeConversation!.id).toList();
+  }
+  
+  // NEW: Load all conversations from Hive
+  void _loadConversations() {
+    _conversations = _conversationBox.values.toList();
+    _conversations.sort((a, b) => b.createdAt.compareTo(a.createdAt)); // Most recent first
+    setState(() {});
+  }
+  
+  // NEW: Set the active conversation
+  void _setActiveConversation(String id) {
+    setState(() {
+      _activeConversation = _conversationBox.get(id);
+      _appStateBox.put('lastActiveConversationId', id);
+    });
+    _scrollToBottom();
+  }
+  
+  // NEW: Create a new conversation
+  void _createNewConversation() {
+    final newId = uuid.v4();
+    final newConversation = Conversation(
+      id: newId,
+      title: "New Chat",
+      createdAt: DateTime.now(),
+    );
+    _conversationBox.put(newId, newConversation);
+    _loadConversations();
+    _setActiveConversation(newId);
+  }
+
+  // NEW: Delete a conversation
+  Future<void> _deleteConversation(String id) async {
+    // Prevent deleting the last conversation
+    if(_conversationBox.length <= 1) {
+       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Cannot delete the last conversation.")));
+       return;
+    }
+    
+    final messagesToDelete = _messageBox.values.where((msg) => msg.conversationId == id).toList();
+    for (var msg in messagesToDelete) {
+      await msg.delete();
+    }
+    
+    await _conversationBox.delete(id);
+    
+    _loadConversations();
+    if (_activeConversation?.id == id) {
+      _setActiveConversation(_conversations.first.id);
+    } else {
+      setState(() {});
+    }
+  }
+
+  // NEW: Rename a conversation
+  Future<void> _renameConversation(Conversation conversation) async {
+    final titleController = TextEditingController(text: conversation.title);
+    final newTitle = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename Conversation'),
+        content: TextField(controller: titleController, autofocus: true, decoration: const InputDecoration(hintText: "Enter new title")),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.of(context).pop(titleController.text), child: const Text('Rename')),
+        ],
+      ),
+    );
+
+    if (newTitle != null && newTitle.trim().isNotEmpty) {
+      conversation.title = newTitle.trim();
+      await conversation.save();
+      _loadConversations();
+    }
+  }
+
 
   void _initTts() {
     _flutterTts.setStartHandler(() {
@@ -221,7 +345,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       },
       listenFor: const Duration(minutes: 5),
       pauseFor: const Duration(seconds: 3),
-      partialResults: true, // Set to true for more responsive feedback in controller
+      partialResults: true,
     );
     if(mounted) setState(() => _isListening = true);
   }
@@ -280,10 +404,11 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
 
   Future<void> _sendMessage(String text) async {
+    if (_activeConversation == null) return;
+    final currentConversation = _activeConversation!;
+
     if (text.trim().isEmpty && _selectedImage == null) {
-      if (_voiceModeEnabled && !_isLoading && !_isSpeaking) {
-        _startListeningForVoiceMode();
-      }
+      if (_voiceModeEnabled && !_isLoading && !_isSpeaking) _startListeningForVoiceMode();
       return;
     }
 
@@ -291,23 +416,38 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     await _stopListening();
     await _stopSpeaking();
 
-    final userMessage = ChatMessage(text: text, isUser: true, imagePath: _selectedImage?.path);
+    final userMessage = ChatMessage(
+        text: text,
+        isUser: true,
+        imagePath: _selectedImage?.path,
+        conversationId: currentConversation.id,
+    );
+    _messageBox.add(userMessage);
+
     setState(() {
-      _messages.add(userMessage);
       _isLoading = true;
+      // The message list is rebuilt dynamically, so we just need to trigger a rebuild
     });
-    _chatBox.add(userMessage);
+
     _scrollToBottom();
     _controller.clear();
+    
+    // Auto-rename conversation based on first message
+    if (_messages.length == 1 && currentConversation.title == "New Chat") {
+      final newTitle = text.trim().length > 30 ? "${text.trim().substring(0, 30)}..." : text.trim();
+      if(newTitle.isNotEmpty) {
+        currentConversation.title = newTitle;
+        await currentConversation.save();
+        _loadConversations(); // Refresh drawer list
+      }
+    }
 
-    // Use a placeholder message index for the typing indicator
-    final int aiMessageIndex = _messages.length;
-    final aiMessagePlaceholder = ChatMessage(text: '', isUser: false);
-    setState(() => _messages.add(aiMessagePlaceholder));
+
+    final aiMessagePlaceholder = ChatMessage(text: '', isUser: false, conversationId: currentConversation.id);
+    final int aiMessageKey = await _messageBox.add(aiMessagePlaceholder);
+    
+    setState(() {}); // Rebuild to show placeholder
     _scrollToBottom();
-
-    // The key for the final message in Hive
-    final int aiMessageKey = await _chatBox.add(aiMessagePlaceholder);
 
 
     try {
@@ -318,7 +458,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         final imageBytes = await _selectedImage!.readAsBytes();
         base64Image = base64Encode(imageBytes);
       }
-      // Since image is now encoded, we can clear the selection from the UI
       if(mounted) setState(() => _selectedImage = null);
 
       final systemPrompt = _systemPromptController.text.trim();
@@ -329,7 +468,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
         'system': systemPrompt.isNotEmpty ? systemPrompt : null,
         'think': _shouldThink,
         'images': base64Image != null ? [base64Image] : null,
-        'context': _conversationContext,
+        'context': currentConversation.context, // Use conversation-specific context
         'stream': true,
       };
 
@@ -344,6 +483,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
       final lines = streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter());
 
       String streamedResponseText = '';
+      List<int>? newContext;
 
       await for (final line in lines) {
         if (mounted) {
@@ -351,39 +491,43 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
             final chunk = jsonDecode(line);
             final part = chunk['response'] ?? '';
             streamedResponseText += part;
+            
+            // Get the placeholder from the box and update it
+            final currentAIMessage = _messageBox.get(aiMessageKey);
+            if(currentAIMessage != null) {
+              currentAIMessage.text = streamedResponseText;
+              await _messageBox.put(aiMessageKey, currentAIMessage);
+            }
 
-            setState(() {
-              _messages[aiMessageIndex] = ChatMessage(text: streamedResponseText, isUser: false);
-            });
+            setState(() {}); // This will rebuild the list and show the streaming text
             _scrollToBottom();
 
             if (chunk['done'] == true && chunk['context'] != null) {
-                _conversationContext = List<int>.from(chunk['context']);
-                await _appStateBox.put('lastContext', _conversationContext);
+                newContext = List<int>.from(chunk['context']);
             }
           } catch (e) {
             debugPrint('Invalid JSON line: $line');
           }
         }
       }
+      
+      // Update the conversation's context
+      if (newContext != null) {
+        currentConversation.context = newContext;
+        await currentConversation.save();
+      }
 
-      final finalMessageText = streamedResponseText.trim();
-      final finalMessage = ChatMessage(text: finalMessageText, isUser: false);
-      await _chatBox.put(aiMessageKey, finalMessage);
-
-      if (_voiceModeEnabled && finalMessageText.isNotEmpty) {
-        await _speak(finalMessageText);
+      if (_voiceModeEnabled && streamedResponseText.trim().isNotEmpty) {
+        await _speak(streamedResponseText.trim());
       }
 
     } catch (e) {
-      if (mounted) {
-        final finalMessage = _isManuallyStopped
-            ? ChatMessage(text: "[Generation stopped by user]", isUser: false)
-            : ChatMessage(text: "Error: ${e.toString()}", isUser: false);
-        setState(() => _messages[aiMessageIndex] = finalMessage);
-        await _chatBox.put(aiMessageKey, finalMessage);
-        if (_voiceModeEnabled) await _speak(finalMessage.text);
-      }
+      final finalMessageText = _isManuallyStopped
+            ? "[Generation stopped by user]"
+            : "Error: ${e.toString()}";
+      final finalMessage = ChatMessage(text: finalMessageText, isUser: false, conversationId: currentConversation.id);
+      await _messageBox.put(aiMessageKey, finalMessage);
+      if (_voiceModeEnabled) await _speak(finalMessage.text);
     } finally {
       if (mounted) setState(() => _isLoading = false);
       _client?.close();
@@ -408,12 +552,14 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     }
   }
 
-  Future<void> _clearConversation() async {
+  Future<void> _clearCurrentConversation() async {
+    if (_activeConversation == null) return;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Clear Conversation?'),
-        content: const Text('This will delete all messages and reset the conversation context. It will not clear the System Prompt memory.'),
+        content: const Text('This will delete all messages and reset the context for this specific chat.'),
         actions: [
           TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
           TextButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Clear')),
@@ -422,17 +568,20 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
 
     if (confirmed ?? false) {
-      await _chatBox.clear();
-      await _appStateBox.delete('lastContext');
-      setState(() {
-        _messages.clear();
-        _conversationContext = null;
-      });
+      // Clear context
+      _activeConversation!.context = null;
+      await _activeConversation!.save();
+
+      // Delete messages
+      final messagesToDelete = _messageBox.values.where((msg) => msg.conversationId == _activeConversation!.id).toList();
+      for (var msg in messagesToDelete) {
+        await msg.delete();
+      }
+
+      setState(() {});
       await _stopListening();
       await _stopSpeaking();
-      if (_voiceModeEnabled) {
-        _startListeningForVoiceMode();
-      }
+      if (_voiceModeEnabled) _startListeningForVoiceMode();
     }
   }
 
@@ -468,24 +617,8 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     await _appStateBox.put('voiceModeEnabled', _voiceModeEnabled);
 
     if (_voiceModeEnabled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Voice Mode ON. Speak to chat.'),
-          duration: const Duration(seconds: 2),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150, left: 16, right: 16),
-        ),
-      );
-      _startListeningForVoiceMode();
+       _startListeningForVoiceMode();
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Voice Mode OFF.'),
-          duration: const Duration(seconds: 2),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.only(bottom: MediaQuery.of(context).size.height - 150, left: 16, right: 16),
-        ),
-      );
       await _stopListening();
       await _stopSpeaking();
     }
@@ -494,9 +627,12 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Get messages for the current conversation for this build pass
+    final currentMessages = _messages;
+    
     return Scaffold(
       appBar: AppBar(
-        title: const Text('HAL 9000'),
+        title: Text(_activeConversation?.title ?? 'HAL 9000'),
         shape: Border(bottom: BorderSide(color: Theme.of(context).colorScheme.outlineVariant, width: 0.5)),
         actions: [
           IconButton(
@@ -513,74 +649,67 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               MyApp.of(context).changeTheme(newTheme);
             },
           ),
-          IconButton(icon: const Icon(Icons.delete_sweep_outlined), tooltip: 'Clear Conversation', onPressed: _clearConversation),
+          IconButton(icon: const Icon(Icons.delete_sweep_outlined), tooltip: 'Clear Current Conversation', onPressed: _clearCurrentConversation),
           IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Settings', onPressed: () => _showSettingsDialog(context)),
         ],
       ),
-      body: Stack(
+      drawer: _buildConversationDrawer(),
+      body: Column(
         children: [
-          Column(
-            children: [
-              Expanded(
-                // NEW: Show a welcome message if the chat is empty
-                child: _messages.isEmpty
-                    ? _buildEmptyState()
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.all(8.0),
-                        itemCount: _messages.length,
-                        itemBuilder: (context, index) {
-                          final message = _messages[index];
-                          // NEW: If it's the last message and we are loading, show typing indicator
-                          if (index == _messages.length - 1 && _isLoading && message.text.isEmpty && !message.isUser) {
-                            return const TypingIndicator();
-                          }
-                          return ChatBubble(
-                            message: message,
-                            onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
-                            onCopy: message.isUser ? null : _copyToClipboard,
-                            imagePath: message.imagePath,
-                          );
-                        },
-                      ),
-              ),
-              if (_selectedImage != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                  child: Stack(
-                    children: [
-                      Container(
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Theme.of(context).colorScheme.outline),
-                          borderRadius: BorderRadius.circular(8.0),
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8.0),
-                          child: Image.file(_selectedImage!, height: 100, width: 100, fit: BoxFit.cover),
-                        ),
-                      ),
-                      Positioned(
-                        top: 4,
-                        right: 4,
-                        child: InkWell(
-                          onTap: _clearImage,
-                          child: Container(
-                            decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
-                            child: const Icon(Icons.close, color: Colors.white, size: 18),
-                          ),
-                        ),
-                      )
-                    ],
+          Expanded(
+            child: currentMessages.isEmpty
+                ? _buildEmptyState()
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.all(8.0),
+                    itemCount: currentMessages.length,
+                    itemBuilder: (context, index) {
+                      final message = currentMessages[index];
+                      // Show typing indicator on the last message if it's an empty AI response and we're loading
+                      if (index == currentMessages.length - 1 && _isLoading && message.text.isEmpty && !message.isUser) {
+                        return const TypingIndicator();
+                      }
+                      return ChatBubble(
+                        message: message,
+                        onSpeak: message.isUser || _voiceModeEnabled ? null : _speak,
+                        onCopy: message.isUser ? null : _copyToClipboard,
+                      );
+                    },
                   ),
-                ),
-              _buildInputArea(context),
-            ],
           ),
+          if (_selectedImage != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              child: Stack(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Theme.of(context).colorScheme.outline),
+                      borderRadius: BorderRadius.circular(8.0),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8.0),
+                      child: Image.file(_selectedImage!, height: 100, width: 100, fit: BoxFit.cover),
+                    ),
+                  ),
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: InkWell(
+                      onTap: _clearImage,
+                      child: Container(
+                        decoration: BoxDecoration(color: Colors.black.withOpacity(0.5), shape: BoxShape.circle),
+                        child: const Icon(Icons.close, color: Colors.white, size: 18),
+                      ),
+                    ),
+                  )
+                ],
+              ),
+            ),
+          // REPOSITIONED: Voice mode UI is now here, above the input area.
           if (_voiceModeEnabled)
-            Positioned(
-              top: 8.0 + MediaQuery.of(context).padding.top,
-              left: 0,
-              right: 0,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
               child: VoiceModeFeedbackOverlay(
                 isListening: _isListening,
                 isSpeaking: _isSpeaking,
@@ -588,10 +717,10 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                 onExitVoiceMode: _toggleVoiceMode,
               ),
             ),
+          _buildInputArea(context),
         ],
       ),
       floatingActionButton: Padding(
-        // CHANGED: Increased bottom padding slightly
         padding: const EdgeInsets.only(bottom: 80.0),
         child: FloatingActionButton(
           onPressed: _speechEnabled ? _toggleVoiceMode : null,
@@ -622,7 +751,63 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
     );
   }
 
-  // NEW: Empty state widget
+  // NEW: Drawer for managing conversations
+  Widget _buildConversationDrawer() {
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  _createNewConversation();
+                  Navigator.of(context).pop(); // Close drawer
+                },
+                icon: const Icon(Icons.add),
+                label: const Text('New Chat'),
+                style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(50)),
+              ),
+            ),
+            const Divider(),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _conversations.length,
+                itemBuilder: (context, index) {
+                  final conversation = _conversations[index];
+                  final isActive = _activeConversation?.id == conversation.id;
+                  return ListTile(
+                    title: Text(conversation.title, overflow: TextOverflow.ellipsis),
+                    selected: isActive,
+                    selectedTileColor: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.5),
+                    onTap: () {
+                      _setActiveConversation(conversation.id);
+                      Navigator.of(context).pop(); // Close drawer
+                    },
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (value) {
+                        if (value == 'rename') {
+                          _renameConversation(conversation);
+                        } else if (value == 'delete') {
+                          _deleteConversation(conversation.id);
+                        }
+                      },
+                      itemBuilder: (context) => [
+                        const PopupMenuItem(value: 'rename', child: Text('Rename')),
+                        const PopupMenuItem(value: 'delete', child: Text('Delete')),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+
   Widget _buildEmptyState() {
     return const Center(
       child: Column(
@@ -636,7 +821,7 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           ),
           SizedBox(height: 8.0),
           Text(
-            "Type a message, attach an image,\nor use voice mode to begin.",
+            "Start a new chat from the drawer,\ntype a message, or use voice mode.",
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 16),
           ),
@@ -658,7 +843,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // --- PERSISTENCE: Save settings on change ---
                     Text('Connection', style: Theme.of(context).textTheme.titleMedium),
                     const SizedBox(height: 8.0),
                     TextField(
@@ -679,7 +863,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
                       controller: _systemPromptController,
                       decoration: const InputDecoration(labelText: 'System Prompt (AI Memory)', border: OutlineInputBorder()),
                       maxLines: 8,
-                      // Listener is already attached in initState
                     ),
                     const SizedBox(height: 16.0),
                     TextField(
@@ -748,7 +931,6 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
           children: [
             IconButton(
               icon: const Icon(Icons.attach_file_outlined),
-              // CHANGED: Disable button while loading
               onPressed: _isLoading ? null : _pickImage,
               tooltip: 'Attach Image',
             ),
@@ -756,14 +938,12 @@ class _OllamaChatPageState extends State<OllamaChatPage> {
               IconButton(
                 icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
                 color: _isListening ? Theme.of(context).colorScheme.primary : null,
-                // CHANGED: Disable button while loading
                 onPressed: !_speechEnabled || _isLoading ? null : (_isListening ? _stopListening : _startListeningManual),
                 tooltip: _isListening ? 'Stop listening' : 'Listen',
               ),
             Expanded(
               child: TextField(
                 controller: _controller,
-                // CHANGED: Disable submission when loading or in voice mode
                 onSubmitted: (_isLoading || _voiceModeEnabled) ? null : (text) => _sendMessage(text),
                 enabled: !_isLoading,
                 decoration: InputDecoration(
@@ -804,13 +984,11 @@ class ChatBubble extends StatelessWidget {
   final ChatMessage message;
   final void Function(String text)? onSpeak;
   final void Function(String text)? onCopy;
-  final String? imagePath;
 
   const ChatBubble({
     required this.message,
     this.onSpeak,
     this.onCopy,
-    this.imagePath,
     super.key,
   });
 
@@ -819,18 +997,14 @@ class ChatBubble extends StatelessWidget {
     final theme = Theme.of(context);
     final isUser = message.isUser;
 
-    // CORRECTED: This stylesheet is now valid.
     final markdownStyle = MarkdownStyleSheet.fromTheme(theme).copyWith(
       p: theme.textTheme.bodyLarge,
-      // The 'code' parameter styles the text inside BOTH inline code and code blocks.
       code: theme.textTheme.bodyMedium!.copyWith(
         fontFamily: 'monospace',
-        // This background color applies to inline `code` snippets.
         backgroundColor: theme.colorScheme.onSurface.withOpacity(0.1),
       ),
-      // 'codeblockDecoration' styles the entire block container.
       codeblockDecoration: BoxDecoration(
-        color: theme.colorScheme.surface, // Background for the whole block
+        color: theme.colorScheme.surface,
         borderRadius: BorderRadius.circular(8.0),
         border: Border.all(color: theme.dividerColor),
       ),
@@ -860,13 +1034,13 @@ class ChatBubble extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (imagePath != null)
+                      if (message.imagePath != null)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8.0),
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(8.0),
                             child: Image.file(
-                              File(imagePath!),
+                              File(message.imagePath!),
                               height: 150,
                               fit: BoxFit.cover,
                             ),
@@ -875,14 +1049,14 @@ class ChatBubble extends StatelessWidget {
                       MarkdownBody(
                         data: message.text,
                         styleSheet: markdownStyle,
+                        selectable: true,
                       ),
-                      // CHANGED: Moved action buttons here, inside the bubble
                       if (!isUser && message.text.isNotEmpty && (onSpeak != null || onCopy != null))
                         Padding(
                           padding: const EdgeInsets.only(top: 8.0),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min, // Take only needed space
+                            mainAxisSize: MainAxisSize.min,
                             children: [
                               if (onSpeak != null)
                                 IconButton(
@@ -920,7 +1094,6 @@ class ChatBubble extends StatelessWidget {
   }
 }
 
-// NEW: Animated typing indicator widget
 class TypingIndicator extends StatefulWidget {
   const TypingIndicator({super.key});
 
@@ -950,7 +1123,7 @@ class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProv
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14.0, horizontal: 8.0),
+      padding: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 0.0),
       child: Row(
         children: [
            Padding(
@@ -958,6 +1131,7 @@ class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProv
             child: CircleAvatar(child: Icon(Icons.auto_awesome, color: theme.colorScheme.onPrimaryContainer)),
           ),
           Container(
+            margin: const EdgeInsets.symmetric(vertical: 4.0),
             padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 14.0),
             decoration: BoxDecoration(
               color: theme.colorScheme.surfaceContainerHighest,
@@ -992,7 +1166,7 @@ class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProv
   }
 }
 
-
+// REPOSITIONED: This widget is no longer an overlay but an inline component.
 class VoiceModeFeedbackOverlay extends StatelessWidget {
   final bool isListening;
   final bool isSpeaking;
@@ -1024,35 +1198,32 @@ class VoiceModeFeedbackOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20.0),
-      child: Card(
-        color: theme.colorScheme.primaryContainer,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20.0)),
-        elevation: 8.0,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
-          child: Row(
-            mainAxisSize: MainAxisSize.max,
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Icon(_statusIcon, color: theme.colorScheme.onPrimaryContainer, size: 30),
-              const SizedBox(width: 12.0),
-              Expanded(
-                child: Text(
-                  _statusText,
-                  style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onPrimaryContainer),
-                  overflow: TextOverflow.ellipsis,
-                ),
+    return Card(
+      color: theme.colorScheme.primaryContainer,
+      elevation: 2.0,
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+        child: Row(
+          children: [
+            Icon(_statusIcon, color: theme.colorScheme.onPrimaryContainer, size: 24),
+            const SizedBox(width: 12.0),
+            Expanded(
+              child: Text(
+                _statusText,
+                style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.onPrimaryContainer, fontWeight: FontWeight.bold),
+                overflow: TextOverflow.ellipsis,
               ),
-              IconButton(
-                icon: const Icon(Icons.close),
-                color: theme.colorScheme.onPrimaryContainer,
-                onPressed: onExitVoiceMode,
-                tooltip: 'Exit Voice Mode',
-              ),
-            ],
-          ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close),
+              iconSize: 20,
+              visualDensity: VisualDensity.compact,
+              color: theme.colorScheme.onPrimaryContainer,
+              onPressed: onExitVoiceMode,
+              tooltip: 'Exit Voice Mode',
+            ),
+          ],
         ),
       ),
     );
